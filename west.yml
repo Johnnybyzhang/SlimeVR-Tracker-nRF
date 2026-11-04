@@ -5,6 +5,6 @@ manifest:
     # nRF-Connect SDK
     - name: sdk-nrf
       path: nrf
-      url: https://github.com/jitingcn/sdk-nrf.git
-      revision: v3.4-branch
+      url: https://github.com/Johnnybyzhang/sdk-nrf.git
+      revision: 4b7d847d00508c4e4d821dd283325e70861ca2cb
       import: true
