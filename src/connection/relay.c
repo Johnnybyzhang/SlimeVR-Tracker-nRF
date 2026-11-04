@@ -292,7 +292,7 @@ static void relay_store(uint8_t child, const struct relay_rx_frame *frame, uint8
 static void relay_expire_locked(uint32_t now, const struct tdma_layout *layout)
 {
 	uint16_t frame = layout->profile ? (uint16_t)relay_frame_at_tick(
-		control_plan.preamble_ticks - RELAY_V3_B_PREAMBLE - relay_frame_start(0, control_plan.frame), now) : 0;
+		relay_control_origin(control_plan.preamble_ticks, control_plan.frame), now) : 0;
 	for (unsigned i = 0; i < (layout->profile ? RELAY_CACHE_RECORDS : RELAY_MAX_CHILDREN); i++) {
 		if (!records[i].valid) {
 			continue;
@@ -454,7 +454,7 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 	uint32_t generation = relay_generation;
 	uint32_t session = control_plan.session;
 	uint32_t control_frame = control_plan.frame;
-	uint32_t control_start = control_plan.preamble_ticks - RELAY_V3_B_PREAMBLE;
+	uint32_t control_start = relay_control_start(control_plan.preamble_ticks);
 	bool valid = !layout->profile || (control_valid && control_plan.epoch == layout->epoch);
 	irq_unlock(snapshot_key);
 	if (!valid) return false;
@@ -730,10 +730,9 @@ static void relay_thread(void)
 				/* After D10, let the lower-priority connection thread open
 				 * B before searching the next frame's helper assignments. */
 				uint32_t now;
-				uint32_t origin = control_plan.preamble_ticks - RELAY_V3_B_PREAMBLE -
-					relay_frame_start(0, control_plan.frame);
+				uint32_t origin = relay_control_origin(control_plan.preamble_ticks, control_plan.frame);
 				if (tdma_network_now(&now)) {
-					uint32_t frame = relay_frame_near(control_plan.frame, control_plan.preamble_ticks - RELAY_V3_B_PREAMBLE, now);
+					uint32_t frame = relay_frame_near(control_plan.frame, relay_control_start(control_plan.preamble_ticks), now);
 					uint32_t phase = now - relay_frame_start(origin, frame);
 					if (phase >= (RELAY_V3_DIRECT_SLOTS - 1U) * RELAY_V3_SLOT_TICKS &&
 					    phase < RELAY_V3_REPAIR_START) {
@@ -943,7 +942,7 @@ bool relay_next_maintenance(uint32_t *target)
 	    control_plan.maintenance_owner != control_helper || !tdma_network_now(&now)) {
 		return false;
 	}
-	uint32_t start = control_plan.preamble_ticks - RELAY_V3_B_PREAMBLE + RELAY_V3_REPAIR_START;
+	uint32_t start = relay_repair_start(control_plan.preamble_ticks, 0);
 	if ((int32_t)(now - start) > (int32_t)relay_maintenance_lag_max) {
 		relay_maintenance_lag_max = now - start;
 	}
@@ -978,8 +977,7 @@ bool relay_next_repair(uint32_t *target, uint8_t *slot)
 		return false;
 	}
 	for (uint8_t i = 0; i < control_plan.repair_count; i++) {
-		uint32_t at = control_plan.preamble_ticks - RELAY_V3_B_PREAMBLE + RELAY_V3_REPAIR_START +
-			      i * RELAY_V3_SLOT_TICKS + RELAY_V3_TX_OFFSET;
+		uint32_t at = relay_repair_start(control_plan.preamble_ticks, i) + RELAY_V3_TX_OFFSET;
 		if ((int32_t)(at + RELAY_V3_TX_OFFSET - now) >= 0 && !(repair_attempted & (1U << i)) &&
 		    control_plan.grants[i].owner == control_helper) {
 			*target = (int32_t)(at - now) < 0 ? now : at;
@@ -1127,6 +1125,6 @@ void relay_repair_result(int result)
 void relay_ledger_tick(uint32_t tick, uint8_t child, uint8_t event, int16_t detail)
 {
  if (!control_valid) return;
- ledger_note(control_plan.session, relay_frame_near(control_plan.frame, control_plan.preamble_ticks - RELAY_V3_B_PREAMBLE, tick), child, event, detail, control_helper, 0);
+ ledger_note(control_plan.session, relay_frame_near(control_plan.frame, relay_control_start(control_plan.preamble_ticks), tick), child, event, detail, control_helper, 0);
 }
 #endif

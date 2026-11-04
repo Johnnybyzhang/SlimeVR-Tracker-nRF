@@ -127,6 +127,8 @@ void tdma_init(uint8_t tracker_id)
 #define TDMA_LEN18_32_RESERVE_TICKS 10
 #define TDMA_LEN33_PLUS_RESERVE_TICKS 12
 #define TDMA_SLOT_TARGET_OFFSET 2
+#define TDMA_FRESH_SOURCE_HANDOFF_TICKS 4
+_Static_assert(TDMA_SLOT_TARGET_OFFSET == RELAY_V3_TX_OFFSET, "v3 TX target");
 #define TDMA_PING_LATE_TOLERANCE_TICKS 6
 #define TDMA_MIN_SAFE_SLOT_TICKS 16
 #define TDMA_SYNC_STALE_MS (PING_INTERVAL_MS * 10)
@@ -477,8 +479,8 @@ uint8_t tdma_profile_get(void)
 void tdma_stream_anchor(uint32_t preamble, uint32_t frame)
 {
 	tdma_anchor_frame = frame;
-	tdma_anchor_start = preamble - RELAY_V3_B_PREAMBLE;
-	tdma_profile_origin = preamble - RELAY_V3_B_PREAMBLE - relay_frame_start(0, frame);
+	tdma_anchor_start = relay_control_start(preamble);
+	tdma_profile_origin = relay_control_origin(preamble, frame);
 }
 
 /* Next tick at `offset` into a frame, at or after now. */
@@ -546,7 +548,7 @@ static bool tdma_stream_admit(uint8_t slot, uint8_t reserve, bool consume)
 		if (consume && slot == 0) {
 			uint32_t next = relay_frame_start(tdma_profile_origin, frame + 1U);
 			int32_t early = clock.receiver_ticks - next;
-			if (early >= TDMA_SLOT_TARGET_OFFSET - 4 && early < 0) {
+			if (early >= TDMA_SLOT_TARGET_OFFSET - TDMA_FRESH_SOURCE_HANDOFF_TICKS && early < 0) {
 				frame++;
 				start = next;
 				pos = early;
@@ -554,7 +556,7 @@ static bool tdma_stream_admit(uint8_t slot, uint8_t reserve, bool consume)
 		}
 		/* The connection loop arrives at the slot start with its frame built;
 		 * hold for the target offset instead of refusing. */
-		if (consume && pos >= TDMA_SLOT_TARGET_OFFSET - 4 && pos < TDMA_SLOT_TARGET_OFFSET) {
+		if (consume && pos >= TDMA_SLOT_TARGET_OFFSET - TDMA_FRESH_SOURCE_HANDOFF_TICKS && pos < TDMA_SLOT_TARGET_OFFSET) {
 			k_busy_wait(5);
 			continue;
 		}

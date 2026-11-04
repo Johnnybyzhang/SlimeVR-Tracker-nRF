@@ -1547,6 +1547,14 @@ bool esb_receiver_relay_aware(void)
 	return own_pong_seen && relay_pong_is_extended(own_pong_length);
 }
 
+/* Caller has already selected v3 and sampled the network clock. */
+static inline bool esb_v3_lease_at(uint32_t receiver_ticks)
+{
+	return control_seen
+		&& (uint32_t)(receiver_ticks - control_tick) <= RELAY_V3_CACHE_FRAMES * RELAY_V3_FRAME_TICKS_MAX
+		&& (uint32_t)(k_uptime_get_32() - layout_confirm_time) < RELAY_LAYOUT_GRANT_MS;
+}
+
 /* V3 admission already has a network-clock sample. Validate its lease without
  * projecting the same clock again inside the slot's final check. */
 #if defined(__GNUC__) && !defined(__clang__)
@@ -1555,9 +1563,7 @@ __attribute__((optimize("O3")))
 #endif
 bool esb_relay_granted_at(uint32_t receiver_ticks)
 {
-	return !tdma_layout_withdrawn() && tdma_profile_get() && control_seen
-		&& (uint32_t)(receiver_ticks - control_tick) <= RELAY_V3_CACHE_FRAMES * RELAY_V3_FRAME_TICKS_MAX
-		&& (uint32_t)(k_uptime_get_32() - layout_confirm_time) < RELAY_LAYOUT_GRANT_MS;
+	return !tdma_layout_withdrawn() && tdma_profile_get() && esb_v3_lease_at(receiver_ticks);
 }
 
 /* Data may use the current layout: not withdrawn, and with a relay-aware
@@ -1574,9 +1580,7 @@ bool esb_layout_granted(void)
 	}
 	if (tdma_profile_get()) {
 		struct esb_network_clock clock;
-		return control_seen && esb_get_network_clock(&clock)
-			&& (uint32_t)(clock.receiver_ticks - control_tick) <= RELAY_V3_CACHE_FRAMES * RELAY_V3_FRAME_TICKS_MAX
-			&& (uint32_t)(k_uptime_get_32() - layout_confirm_time) < RELAY_LAYOUT_GRANT_MS;
+		return control_seen && esb_get_network_clock(&clock) && esb_v3_lease_at(clock.receiver_ticks);
 	}
 	if (!esb_receiver_relay_aware()) {
 		return true;

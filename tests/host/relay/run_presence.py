@@ -23,6 +23,7 @@ constants += '\n' + re.search(r'^#define RECEIVER_RESTART_BACKWARD_TICKS[^\n]*',
 note = extract_block(esb, r'^static void esb_note_trailer_locked\([^;{]*\)\s*\{')
 function = extract_block(esb, r'^bool esb_presence_frame\([^;{]*\)\s*\{')
 control = extract_block(esb, r'^bool esb_relay_control_receive\([^;{]*\)\s*\{')
+lease = extract_block(esb, r'^static inline bool esb_v3_lease_at\([^;{]*\)\s*\{')
 grant_at = extract_block(esb, r'^bool esb_relay_granted_at\([^;{]*\)\s*\{')
 grant = extract_block(esb, r'^bool esb_layout_granted\([^;{]*\)\s*\{')
 stage = extract_block(esb, r'^static void esb_stage_from_trailer\([^;{]*\)\s*\{')
@@ -179,6 +180,10 @@ int main(int argc,char **argv) {
   current_tick=100000+RELAY_V3_CACHE_FRAMES*RELAY_V3_FRAME_TICKS_MAX;
   assert(esb_relay_granted_at(current_tick));
   assert(!esb_relay_granted_at(current_tick+1));
+  uint32_t saved_tick=control_tick;control_tick=0xfffffff0U;
+  assert(esb_v3_lease_at(control_tick+RELAY_V3_CACHE_FRAMES*RELAY_V3_FRAME_TICKS_MAX));
+  assert(!esb_v3_lease_at(control_tick+RELAY_V3_CACHE_FRAMES*RELAY_V3_FRAME_TICKS_MAX+1));
+  control_tick=saved_tick;
   assert(!esb_relay_control_receive(&f)); /* duplicate/stale frame */
   b.frame++; relay_control_encode(f.data,&b); f.end_kernel_ticks+=10;
   assert(!esb_relay_control_receive(&f) && sync_filter.last_local_ticks==100000); /* late delivery */
@@ -200,7 +205,7 @@ int main(int argc,char **argv) {
 '''
 with tempfile.TemporaryDirectory(prefix="relay-presence-", dir="/tmp") as tmp:
     path = Path(tmp) / "presence.c"
-    path.write_text(PREFIX + constants + '\n' + note + '\n' + stage + '\n' + function + '\n' + control + '\n' + grant_at + '\n' + grant + CASES)
+    path.write_text(PREFIX + constants + '\n' + note + '\n' + stage + '\n' + function + '\n' + control + '\n' + lease + '\n' + grant_at + '\n' + grant + CASES)
     binary = Path(tmp) / "presence"
     subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-Wno-unused-variable",
