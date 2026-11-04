@@ -16,6 +16,13 @@ ROOT = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2]))
 source = (ROOT / "src/connection/relay.c").read_text()
 source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.MULTILINE)
 
+source += r'''
+static void test_store(uint8_t child, const struct relay_rx_frame *f, uint8_t epoch, uint32_t expiry) {
+ struct tdma_layout l; if(!tdma_layout_get(&l))return;
+ relay_store(child,f,epoch,expiry,&l,(uint16_t)relay_frame_near(control_plan.frame,control_plan.preamble_ticks-RELAY_V3_B_PREAMBLE,expiry-l.frame_ticks),relay_generation);
+}
+'''
+
 PREFIX = r'''
 #include <assert.h>
 #include <errno.h>
@@ -120,13 +127,13 @@ static void reset(void) {
     incoming.data[0]=1; incoming.data[1]=1; incoming.data[16]=5;
 }
 static void adjacent_child(void) {
-    reset(); relay_store(1,&incoming,7,192);
+    reset(); test_store(1,&incoming,7,192);
     uint8_t out[72] = {1,0}; out[16]=3;
     size_t n=relay_build_bundle(out,17,sizeof(out),0);
     assert(n && "adjacent child was discarded before the own opportunity");
     struct relay_bundle_view view; assert(relay_bundle_decode(out,n,&view));
     assert(view.record_count==1 && view.records[0].frame[1]==1);
-    relay_store(1,&incoming,7,192); now_ticks=190;
+    test_store(1,&incoming,7,192); now_ticks=190;
     assert(!relay_records_pending());
     puts("PASS runtime: adjacent child survives until a usable forwarding opportunity");
 }
@@ -137,7 +144,7 @@ static void no_fit_request(void) {
     const uint8_t types[]={1,4,3,5,0}, sizes[]={14,14,2,8,13};
     unsigned pos=3; for(unsigned i=0;i<5;i++){incoming.data[pos++]=types[i];pos+=sizes[i];}
     incoming.data[pos++]=9; assert(pos==60);
-    relay_store(1,&incoming,7,1000);
+    test_store(1,&incoming,7,1000);
     uint8_t out[72]={1,0}; assert(!relay_build_bundle(out,17,72,0));
     assert(host_info_caps() & 4U);
     assert(relay_records_pending());
@@ -184,7 +191,7 @@ static void fast_cache(void) {
  for(unsigned f=1;f<=3;f++) {
   uint32_t start=relay_frame_start(500,f)+RELAY_V3_SLOT_TICKS;
   now_ticks=start;incoming.data[16]=f;
-  relay_store(1,&incoming,7,start+test_layout.frame_ticks);
+  test_store(1,&incoming,7,start+test_layout.frame_ticks);
  }
  c.frame=3;c.preamble_ticks=relay_frame_start(500,3)+RELAY_V3_B_PREAMBLE;
  c.missing[0]=c.missing[1]=c.missing[2]=2;
@@ -264,14 +271,19 @@ static void failed_store(void) {
  for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++) assert(!records[i].valid);
  layout_failed=true;
  struct relay_rx_frame f={.length=17,.data={1,2}};
- relay_store(2,&f,7,100);
+ test_store(2,&f,7,100);
  for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++)assert(!records[i].valid);
  layout_failed=false;
  test_layout.profile=1;test_layout.frame_ticks=273;
- relay_store(2,&f,7,1000);
+ struct relay_control fresh={.epoch=7,.session=42};relay_on_control(&fresh,0);
+ test_store(2,&f,7,1000);
  assert(records[0].valid && records[0].child==2 && records[0].epoch==7);
  assert(records[0].length==17 && records[0].expiry==1000 && records[0].rssi==f.rssi);
  assert(!memcmp(records[0].data,f.data,17));
+ uint32_t generation=relay_generation;
+ relay_reset();relay_on_control(&fresh,0); /* same session and epoch */
+ relay_store(2,&f,7,1000,&test_layout,3,generation);
+ for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++)assert(!records[i].valid);
  relay_reset();
 }
 static void learned_reports(void) {

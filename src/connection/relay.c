@@ -69,6 +69,7 @@ static struct {
 static uint8_t repair_pending[RELAY_MAX_TRACKERS];
 static struct relay_peer_report pending_report;
 static bool control_valid;
+static uint32_t relay_generation;
 static bool maintenance_attempted;
 uint32_t relay_maintenance_granted, relay_maintenance_late, relay_maintenance_lag_max;
 static uint8_t control_helper;
@@ -142,6 +143,7 @@ static void relay_cache_invalidate(void)
 void relay_reset(void)
 {
 	unsigned key = irq_lock();
+	relay_generation++;
 	assignment.valid = false;
 	control_valid = false;
 	relay_cache_invalidate();
@@ -158,7 +160,7 @@ void relay_reset(void)
 /* Attribute provenance: Capture handoff (0084d3a6) and repair-speed (dc676076) cohorts retained O3 as a group. No isolated attribute-only saving; retain pending A/B. */
 __attribute__((optimize("O3")))
 #endif
-static bool relay_assignment_get(struct relay_pong_trailer *out, struct tdma_layout *layout)
+static bool relay_assignment_locked(struct relay_pong_trailer *out, struct tdma_layout *layout)
 {
 	if (!tdma_layout_get(layout)) {
 		return false;
@@ -209,6 +211,14 @@ static bool relay_assignment_get(struct relay_pong_trailer *out, struct tdma_lay
 	return true;
 }
 
+static bool relay_assignment_get(struct relay_pong_trailer *out, struct tdma_layout *layout)
+{
+	unsigned key = irq_lock();
+	bool valid = relay_assignment_locked(out, layout);
+	irq_unlock(key);
+	return valid;
+}
+
 bool relay_head_active(void)
 {
 	struct relay_pong_trailer trailer;
@@ -237,12 +247,16 @@ int relay_forward_slot(void)
 /* Attribute provenance: Capture handoff (0084d3a6) and repair-speed (dc676076) cohorts retained O3 as a group. No isolated attribute-only saving; retain pending A/B. */
 __attribute__((optimize("O3")))
 #endif
-static void relay_store(uint8_t child, const struct relay_rx_frame *frame, uint8_t epoch, uint32_t expiry)
+static void relay_store(uint8_t child, const struct relay_rx_frame *frame, uint8_t epoch, uint32_t expiry,
+	const struct tdma_layout *snapshot, uint16_t captured, uint32_t generation)
 {
-	struct tdma_layout layout;
-	if (!tdma_layout_get(&layout)) return;
-	uint16_t captured = (uint16_t)relay_frame_near(control_plan.frame, control_plan.preamble_ticks - RELAY_V3_B_PREAMBLE, expiry - layout.frame_ticks);
 	unsigned key = irq_lock();
+	if (generation != relay_generation || (snapshot->profile &&
+	    (!control_valid || control_plan.epoch != epoch))) {
+		irq_unlock(key);
+		return;
+	}
+	const struct tdma_layout layout = *snapshot;
 	struct relay_record *slot = NULL;
 	for (unsigned i = 0; i < (layout.profile ? RELAY_CACHE_RECORDS : RELAY_MAX_CHILDREN); i++) {
 		if (records[i].valid && records[i].child == child &&
@@ -436,7 +450,14 @@ __attribute__((optimize("O3")))
 #endif
 static bool relay_head_window(const struct relay_pong_trailer *trailer, const struct tdma_layout *layout)
 {
+	unsigned snapshot_key = irq_lock();
+	uint32_t generation = relay_generation;
 	uint32_t session = control_plan.session;
+	uint32_t control_frame = control_plan.frame;
+	uint32_t control_start = control_plan.preamble_ticks - RELAY_V3_B_PREAMBLE;
+	bool valid = !layout->profile || (control_valid && control_plan.epoch == layout->epoch);
+	irq_unlock(snapshot_key);
+	if (!valid) return false;
 	uint32_t now;
 	if (!tdma_network_now(&now)) {
 		return false;
@@ -465,8 +486,8 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 		return false;
 	}
 	if (layout->profile) {
-		uint32_t f = relay_frame_near(control_plan.frame, control_plan.preamble_ticks - RELAY_V3_B_PREAMBLE, best_start);
-		if (f <= control_plan.frame || f - control_plan.frame > RELAY_V3_CACHE_FRAMES) {
+		uint32_t f = relay_frame_near(control_frame, control_start, best_start);
+		if (f <= control_frame || f - control_frame > RELAY_V3_CACHE_FRAMES) {
 			return false;
 		}
 	}
@@ -625,7 +646,8 @@ static bool relay_head_window(const struct relay_pong_trailer *trailer, const st
 	}
 	relay_ledger_tick(best_start, best_child, LEDGER_CAPTURE, -(int16_t)frame.rssi);
 	stats.head_captures++;
-	relay_store((uint8_t)best_child, &frame, layout->epoch, best_start + layout->frame_ticks);
+	relay_store((uint8_t)best_child, &frame, layout->epoch, best_start + layout->frame_ticks, layout,
+		(uint16_t)relay_frame_near(control_frame, control_start, best_start), generation);
 	connection_relay_wake();
 	return true;
 }
@@ -865,6 +887,7 @@ void relay_on_control(const struct relay_control *control, uint8_t helper)
 	unsigned key = irq_lock();
 	if (!control_valid || control_plan.session != control->session ||
 	    control_plan.epoch != control->epoch) {
+		relay_generation++;
 		/* The payload bytes are irrelevant once a cache entry is invalid. */
 		relay_cache_invalidate();
 		pending_report.count = 0;
