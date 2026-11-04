@@ -1611,8 +1611,25 @@ uint8_t esb_get_radio_channel(void)
 	return radio_channel;
 }
 
+#ifdef CONFIG_RELAY_IRQ_DIAGNOSTICS
+/* Length zero includes construction failures. Target identifies the same source
+ * opportunity as the maximum; maxima from different phases are never added. */
+static struct { uint32_t count, maximum, target; } source_irq_probe[256];
+#endif
+
 void esb_print_link_status(void)
 {
+#ifdef CONFIG_RELAY_IRQ_DIAGNOSTICS
+    for (unsigned i = 0; i < ARRAY_SIZE(source_irq_probe); i++) {
+        unsigned key = irq_lock();
+        uint32_t count = source_irq_probe[i].count;
+        uint32_t maximum = source_irq_probe[i].maximum;
+        uint32_t target = source_irq_probe[i].target;
+        irq_unlock(key);
+        if (count) printk("irq_probe source length=%u count=%u max=%u target=%u cycles\n",
+                          i, count, maximum, target);
+    }
+#endif
 	printk("link: direct_fail admit=%u air=%u final=%u\n",
 		direct_fail[0], direct_fail[1], direct_fail[2]);
 	unsigned key = irq_lock();
@@ -3621,6 +3638,15 @@ void esb_source_end(struct esb_source_guard *guard)
 {
 	if (!guard->active) return;
 	guard->active = false;
+#ifdef CONFIG_RELAY_IRQ_DIAGNOSTICS
+    uint32_t elapsed = relay_cycle_now() - guard->irq_start;
+    unsigned bucket = MIN(guard->irq_length, 255U);
+    source_irq_probe[bucket].count++;
+    if (elapsed > source_irq_probe[bucket].maximum) {
+        source_irq_probe[bucket].maximum = elapsed;
+        source_irq_probe[bucket].target = guard->irq_target;
+    }
+#endif
 	irq_unlock(guard->key);
 	esb_write_rate_tick();
 	esb_release_tx_clock(false);
@@ -3645,12 +3671,20 @@ bool esb_source_begin(struct esb_source_guard *guard, uint32_t target)
 		return false;
 	}
 	guard->key = irq_lock();
+#ifdef CONFIG_RELAY_IRQ_DIAGNOSTICS
+    guard->irq_start = relay_cycle_now();
+    guard->irq_target = target;
+    guard->irq_length = 0;
+#endif
 	guard->active = true;
 	return true;
 }
 
 int esb_source_write(struct esb_source_guard *guard, uint8_t *data, size_t length)
 {
+#ifdef CONFIG_RELAY_IRQ_DIAGNOSTICS
+    guard->irq_length = length;
+#endif
 	/* A profile change must never enter a sleeping legacy wait under IRQ lock. */
 	int err = -EAGAIN;
 	LEDGER_SOURCE_REASON(LEDGER_REFUSAL_LAYOUT);
@@ -4460,7 +4494,7 @@ static void esb_thread(void)
 	}
 }
 
-#if defined(CONFIG_RELAY_CYCLE_DIAGNOSTICS) || defined(CONFIG_RELAY_LEDGER_TIMING)
+#if defined(CONFIG_RELAY_CYCLE_DIAGNOSTICS) || defined(CONFIG_RELAY_LEDGER_TIMING) || defined(CONFIG_RELAY_IRQ_DIAGNOSTICS)
 static int relay_cycle_init_once(void) { relay_cycle_init(); return 0; }
 SYS_INIT(relay_cycle_init_once, APPLICATION, 0);
 #endif

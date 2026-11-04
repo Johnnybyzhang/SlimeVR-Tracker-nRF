@@ -2,7 +2,7 @@
 #ifndef SLIMENRF_RELAY_TIMING_H
 #define SLIMENRF_RELAY_TIMING_H
 #include <stdint.h>
-#if defined(CONFIG_RELAY_CYCLE_DIAGNOSTICS) || defined(CONFIG_RELAY_LEDGER_TIMING)
+#if defined(CONFIG_RELAY_CYCLE_DIAGNOSTICS) || defined(CONFIG_RELAY_LEDGER_TIMING) || defined(CONFIG_RELAY_IRQ_DIAGNOSTICS)
 #include <cmsis_core.h>
 static inline void relay_cycle_init(void)
 {

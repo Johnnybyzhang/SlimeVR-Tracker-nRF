@@ -90,7 +90,12 @@ void esb_process_ota_rx_queue(void);
 int esb_write(uint8_t *data, bool no_ack, size_t data_length);
 /* One connection-thread source transaction. Setup and sleeping precede the
  * unchanged fresh-pose wake; capture through TX submission is IRQ guarded. */
-struct esb_source_guard { unsigned key; bool active; };
+struct esb_source_guard { unsigned key; bool active;
+#ifdef CONFIG_RELAY_IRQ_DIAGNOSTICS
+    uint32_t irq_start, irq_target;
+    unsigned irq_length;
+#endif
+};
 bool esb_source_begin(struct esb_source_guard *guard, uint32_t target);
 int esb_source_write(struct esb_source_guard *guard, uint8_t *data, size_t length);
 void esb_source_end(struct esb_source_guard *guard);
