@@ -211,10 +211,11 @@ static bool relay_assignment_locked(struct relay_pong_trailer *out, struct tdma_
 	return true;
 }
 
-static bool relay_assignment_get(struct relay_pong_trailer *out, struct tdma_layout *layout)
+static bool relay_assignment_get(struct relay_pong_trailer *out, struct tdma_layout *layout, uint32_t *generation)
 {
 	unsigned key = irq_lock();
 	bool valid = relay_assignment_locked(out, layout);
+	if (valid && generation) *generation = relay_generation;
 	irq_unlock(key);
 	return valid;
 }
@@ -223,14 +224,14 @@ bool relay_head_active(void)
 {
 	struct relay_pong_trailer trailer;
 	struct tdma_layout layout;
-	return relay_assignment_get(&trailer, &layout);
+	return relay_assignment_get(&trailer, &layout, NULL);
 }
 
 int relay_forward_slot(void)
 {
 	struct relay_pong_trailer trailer;
 	struct tdma_layout layout;
-	if (!relay_assignment_get(&trailer, &layout) || trailer.forward_slot == RELAY_NO_SLOT) {
+	if (!relay_assignment_get(&trailer, &layout, NULL) || trailer.forward_slot == RELAY_NO_SLOT) {
 		return -1;
 	}
 	/* A forwarding slot lies after every direct member's slot. Anything else
@@ -448,10 +449,10 @@ static void peer_count(uint8_t child, bool heard, uint8_t rssi)
 /* Attribute provenance: Capture handoff (0084d3a6) and repair-speed (dc676076) cohorts retained O3 as a group. No isolated attribute-only saving; retain pending A/B. */
 __attribute__((optimize("O3")))
 #endif
-static bool relay_head_window(const struct relay_pong_trailer *trailer, const struct tdma_layout *layout)
+static bool relay_head_window(const struct relay_pong_trailer *trailer, const struct tdma_layout *layout, uint32_t generation)
 {
 	unsigned snapshot_key = irq_lock();
-	uint32_t generation = relay_generation;
+	if (generation != relay_generation) { irq_unlock(snapshot_key); return false; }
 	uint32_t session = control_plan.session;
 	uint32_t control_frame = control_plan.frame;
 	uint32_t control_start = relay_control_start(control_plan.preamble_ticks);
@@ -721,18 +722,24 @@ static void relay_thread(void)
 	for (;;) {
 		struct relay_pong_trailer trailer;
 		struct tdma_layout layout;
-		if (relay_assignment_get(&trailer, &layout)) {
+		uint32_t generation;
+		if (relay_assignment_get(&trailer, &layout, &generation)) {
 			relay_clock(true);
-			if (!relay_head_window(&trailer, &layout)) {
+			if (!relay_head_window(&trailer, &layout, generation)) {
 				stats.head_no_window++;
 				k_msleep(1);
 			} else if (layout.profile) {
 				/* After D10, let the lower-priority connection thread open
 				 * B before searching the next frame's helper assignments. */
 				uint32_t now;
-				uint32_t origin = relay_control_origin(control_plan.preamble_ticks, control_plan.frame);
-				if (tdma_network_now(&now)) {
-					uint32_t frame = relay_frame_near(control_plan.frame, relay_control_start(control_plan.preamble_ticks), now);
+				unsigned key = irq_lock();
+				uint32_t anchor_frame = control_plan.frame;
+				uint32_t anchor_preamble = control_plan.preamble_ticks;
+				bool valid = control_valid && control_plan.epoch == layout.epoch;
+				irq_unlock(key);
+				uint32_t origin = relay_control_origin(anchor_preamble, anchor_frame);
+				if (valid && tdma_network_now(&now)) {
+					uint32_t frame = relay_frame_near(anchor_frame, relay_control_start(anchor_preamble), now);
 					uint32_t phase = now - relay_frame_start(origin, frame);
 					if (phase >= (RELAY_V3_DIRECT_SLOTS - 1U) * RELAY_V3_SLOT_TICKS &&
 					    phase < RELAY_V3_REPAIR_START) {
@@ -804,7 +811,7 @@ size_t relay_diag_build(uint8_t *buf, size_t capacity, uint8_t tracker_id)
 	bool have_layout = tdma_layout_get(&layout);
 	struct relay_pong_trailer active;
 	struct tdma_layout unused;
-	bool head = relay_assignment_get(&active, &unused);
+	bool head = relay_assignment_get(&active, &unused, NULL);
 	enum link_state link = esb_link_state();
 	memset(buf, 0, RELAY_DIAG_LEN);
 	buf[0] = RELAY_DIAG_TYPE;
@@ -852,7 +859,7 @@ void relay_print_status(void)
 {
 	struct relay_pong_trailer trailer;
 	struct tdma_layout layout;
-	bool head = relay_assignment_get(&trailer, &layout);
+	bool head = relay_assignment_get(&trailer, &layout, NULL);
 	static const char *const states[] = {"healthy", "degraded", "lost"};
 	enum link_state link = esb_link_state();
 	printk("relay: link=%s head=%s children=0x%04x fwd_slot=%d\n",

@@ -53,7 +53,8 @@ static uint32_t next_ping, hf_acquire_tick, busy_until;
 static uint8_t captured_pipe_mask;
 static struct relay_rx_frame incoming;
 static unsigned irq_depth;
-static unsigned irq_lock(void) { return irq_depth++; }
+static void (*irq_hook)(void);
+static unsigned irq_lock(void) { if(irq_hook){void (*hook)(void)=irq_hook;irq_hook=NULL;hook();} return irq_depth++; }
 static void irq_unlock(unsigned k) { assert(irq_depth==k+1); irq_depth=k; }
 static int64_t k_uptime_get(void) { return now_ms; }
 static void k_sem_give(int *s) { *s = 1; }
@@ -156,7 +157,7 @@ static void lease_and_capture(void) {
     struct relay_pong_trailer tr={.epoch=7,.children_mask=2,.forward_slot=255,.member_mask=3};
     relay_on_own_trailer(&tr); assert(relay_head_active());
     relay_clock(true); now_ticks=140;
-    assert(relay_head_window(&tr,&test_layout)); assert(stats.head_captures==1);
+    assert(relay_head_window(&tr,&test_layout,relay_generation)); assert(stats.head_captures==1);
     assert(captured_pipe_mask==(1U<<2)); assert(relay_records_pending());
     test_layout.epoch++; assert(!relay_head_active()); assert(!relay_records_pending());
     test_layout.epoch--; now_ms+=2501; assert(!relay_head_active());
@@ -174,7 +175,7 @@ static void presence_clock(void) {
 static void late_own_tx(void) {
     reset(); now_ticks=140; busy_until=193;
     struct relay_pong_trailer tr={.epoch=7,.children_mask=2,.forward_slot=255,.member_mask=3};
-    relay_clock(true); assert(relay_head_window(&tr,&test_layout));
+    relay_clock(true); assert(relay_head_window(&tr,&test_layout,relay_generation));
     assert(stats.head_captures==1 && stats.head_busy==0);
     relay_clock(false);
     puts("PASS runtime: RX retries while a long own TX finishes before the child preamble");
@@ -235,10 +236,10 @@ static void fast_cache(void) {
  assert(!relay_records_pending());
  now_ticks=c.preamble_ticks+2*RELAY_V3_FRAME_TICKS_MAX;
  struct relay_pong_trailer tr;struct tdma_layout l;
- assert(relay_assignment_get(&tr,&l));
+ assert(relay_assignment_get(&tr,&l,NULL));
  uint32_t target;uint8_t slot;assert(!relay_next_repair(&target,&slot));
  now_ticks=c.preamble_ticks+(RELAY_V3_CACHE_FRAMES+1)*RELAY_V3_FRAME_TICKS_MAX;
- assert(!relay_assignment_get(&tr,&l));
+ assert(!relay_assignment_get(&tr,&l,NULL));
  c.session++;relay_on_control(&c,0);assert(!records[0].valid);
  puts("PASS runtime: three-frame cache, grant selection, failed queue retention and confirmation");
 }
@@ -254,8 +255,8 @@ static void d10_b_ownership(void) {
  uint32_t d10=test_layout.frame_ticks+10*RELAY_V3_SLOT_TICKS;
  now_ticks=d10-RELAY_RX_LEAD_TICKS;capture_available=false;
  radio_busy=busy;
- assert(relay_assignment_get(&tr,&l));
- relay_clock(true);assert(relay_head_window(&tr,&l));
+ assert(relay_assignment_get(&tr,&l,NULL));
+ relay_clock(true);assert(relay_head_window(&tr,&l,relay_generation));
  assert(!radio_owned);
  assert(now_ticks <= test_layout.frame_ticks+RELAY_V3_B_START-RELAY_RX_LEAD_TICKS);
  relay_clock(false);
@@ -263,6 +264,7 @@ static void d10_b_ownership(void) {
  puts("PASS runtime: missing or busy D10 yields at the unchanged B RX lead");
 }
 
+static void reset_before_insert(void) { relay_reset();struct relay_control c={.session=42,.epoch=7};relay_on_control(&c,0); }
 static void failed_store(void) {
  for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++) {
   memset(&records[i],0xa5,sizeof(records[i])); records[i].valid=true;
@@ -281,6 +283,13 @@ static void failed_store(void) {
  assert(records[0].length==17 && records[0].expiry==1000 && records[0].rssi==f.rssi);
  assert(!memcmp(records[0].data,f.data,17));
  uint32_t generation=relay_generation;
+ irq_hook=reset_before_insert;
+ relay_store(2,&f,7,1000,&test_layout,3,generation);
+ for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++)assert(!records[i].valid);
+ generation=relay_generation;
+ struct relay_pong_trailer tr={0};struct tdma_layout l=test_layout;
+ relay_reset();relay_on_control(&fresh,0);
+ assert(!relay_head_window(&tr,&l,generation));
  relay_reset();relay_on_control(&fresh,0); /* same session and epoch */
  relay_store(2,&f,7,1000,&test_layout,3,generation);
  for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++)assert(!records[i].valid);
@@ -294,13 +303,13 @@ static void learned_reports(void) {
  relay_on_control(&c,0);
  struct relay_pong_trailer tr;struct tdma_layout l;
  now_ticks=280;
- assert(relay_assignment_get(&tr,&l) && tr.children_mask==4); /* self and adjacent excluded */
+ assert(relay_assignment_get(&tr,&l,NULL) && tr.children_mask==4); /* self and adjacent excluded */
  incoming.data[1]=2;incoming.pipe=3;
  relay_clock(true);
- assert(relay_head_window(&tr,&l));
+ assert(relay_head_window(&tr,&l,relay_generation));
  assert(peer_counts[2].expected==1 && peer_counts[2].heard==1 && peer_counts[2].rssi_x8==520);
  capture_available=false; now_ticks+=test_layout.frame_ticks;
- assert(relay_head_window(&tr,&l));
+ assert(relay_head_window(&tr,&l,relay_generation));
  assert(peer_counts[2].expected==2 && peer_counts[2].heard==1);
  relay_clock(false);
  c.frame=2;c.preamble_ticks=relay_frame_start(0,2)+RELAY_V3_B_PREAMBLE;
