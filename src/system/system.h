@@ -102,4 +102,6 @@ int sys_enter_dfu(bool ota); /* Accepted handoff is not bootloader readiness. */
 void sys_skip_dfu(void);
 void sys_reset_mode(uint8_t mode);
 
+void sys_print_last_fatal(void);
+
 #endif
