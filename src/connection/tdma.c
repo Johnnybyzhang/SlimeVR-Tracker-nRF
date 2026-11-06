@@ -56,7 +56,7 @@ static uint8_t tdma_slot_index_init; /* used only before first dyn config */
 #define TDMA_STAGED_BIT 0x40U
 #define TDMA_STAGED_UNASSIGNED 0x20U
 static atomic_t tdma_staged_pack;
-static struct relay_geometry tdma_active_geometry = {16, 1, 16, 120, 288, 1};
+static struct relay_geometry tdma_active_geometry = {16, 1, 16, 120, 288, 1, 0};
 static struct relay_geometry tdma_staged_geometry;
 const struct relay_geometry *relay_geometry_active = &tdma_active_geometry;
 struct relay_timeline relay_timeline_active;
@@ -497,12 +497,13 @@ void tdma_stream_anchor(uint32_t preamble, uint32_t frame)
 
 void tdma_stream_control(const struct relay_control *control)
 {
-	(void)relay_geometry_make(
+	(void)relay_geometry_make_b(
 		&tdma_active_geometry,
 		control->direct_count,
 		control->repair_count,
 		control->slot_ticks,
-		control->tps_max
+		control->tps_max,
+		control->second_b
 	);
 	relay_runtime_anchor_set(
 		&relay_direct_anchor,
@@ -514,6 +515,14 @@ void tdma_stream_control(const struct relay_control *control)
 		relay_control_next2_repairs(control),
 		control->slot_ticks,
 		control->tps_max
+	);
+	relay_runtime_anchor_second_b(
+		&relay_direct_anchor,
+		control->repair_count,
+		relay_control_next_repairs(control),
+		relay_control_next2_repairs(control),
+		control->tps_max,
+		control->second_b
 	);
 	relay_timeline_announce(&relay_timeline_active, &relay_direct_anchor);
 	tdma_stream_anchor(control->preamble_ticks, control->frame);

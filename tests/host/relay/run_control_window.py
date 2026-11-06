@@ -19,7 +19,11 @@ prefix = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#define CONFIG_RELAY_LAYOUT_FOLLOW_RECEIVER 1
 #include "relay_protocol.h"
+static struct relay_geometry geometry={11,5,16,120,4096,15,0};
+const struct relay_geometry *relay_geometry_active=&geometry;
+static unsigned two_case,copy_index;
 static struct relay_runtime_anchor relay_direct_anchor={.valid=true,.third_start=1000,.direct=11,.slot_ticks=16};
 #define BIT(n) (1U<<(n))
 #define MAX(a,b) ((a)>(b)?(a):(b))
@@ -30,7 +34,7 @@ static unsigned control_no_address,control_address_timeout,radio_channel;
 static unsigned depth,claimed,prepared,started,stopped,clock_users,attempts;
 static unsigned tick=96,busy_attempts,delay_calls;
 static bool clock_fail,init_fail,wait_fail,network_fail,timeout,take_fail,stamp_fail,reject,completed_late,edge_wait_fail,prepare_irq,setup_work;
-struct relay_rx_frame {uint32_t end_kernel_ticks;};
+struct relay_rx_frame { uint8_t data[72];uint32_t end_kernel_ticks;};
 struct esb_network_clock {uint32_t receiver_ticks;};
 static unsigned irq_lock(void){return depth++;}
 static void irq_unlock(unsigned key){
@@ -59,12 +63,12 @@ static bool relay_radio_prepare(unsigned channel,unsigned pipes,bool rx){
 static bool relay_radio_receive(void){assert(prepared && claimed && depth && tick>=100);if(setup_work)assert(tick==100);started++;return true;}
 static inline __attribute__((unused)) bool relay_radio_start(unsigned channel,unsigned pipes,bool rx){return relay_radio_prepare(channel,pipes,rx) && relay_radio_receive();}
 static bool esb_get_network_clock(struct esb_network_clock *c){if(completed_late && started)tick=125;c->receiver_ticks=tick;return true;}
-static bool relay_radio_ended(void){return !timeout;}
-static bool relay_radio_take(struct relay_rx_frame *f){(void)f;return !take_fail;}
+static bool relay_radio_ended(void){if(two_case){unsigned at=copy_index==0?111:111+(geometry.second_b==1?16:(geometry.repairs+1)*16);return copy_index<2 && tick>=at && two_case!=3;}return !timeout;}
+static bool relay_radio_take(struct relay_rx_frame *f){if(two_case){f->data[0]=copy_index++?0xec:0xe8;return true;}(void)f;return !take_fail;}
 static void relay_radio_peek(uint8_t *len,bool *crc,uint8_t *rssi){*len=1;*crc=false;*rssi=0;}
 static bool relay_radio_stop(void){assert(prepared && !depth);stopped++;return true;}
 static void esb_raw_rx_end(void){assert(claimed);claimed=0;}
-static bool esb_relay_control_receive(struct relay_rx_frame *f){if(completed_late)assert(f->end_kernel_ticks==111);assert(!depth && !claimed);return !reject;}
+static bool esb_relay_control_receive(struct relay_rx_frame *f){if(completed_late)assert(f->end_kernel_ticks==111);assert(!depth && !claimed);return two_case ? (two_case!=3 && (two_case!=2 || f->data[0]==0xec)) : !reject;}
 static bool relay_radio_addressed(void){return false;}
 '''
 cases = r'''
@@ -77,6 +81,14 @@ int main(int argc,char **argv){
  if(!strcmp(c,"deadline") || !strcmp(c,"no-clock"))busy_attempts=100;
  edge_wait_fail=!strcmp(c,"wait-edge");prepare_irq=!strcmp(c,"prepare-irq") || !strcmp(c,"scan-delay");setup_work=!strcmp(c,"setup-work");
  network_fail=!strcmp(c,"no-clock");completed_late=!strcmp(c,"completed-late");
+ if(!strncmp(c,"two-",4)){
+  geometry.repairs=strstr(c,"short")?2:4;if(strstr(c,"short"))relay_direct_anchor.next_start=164;geometry.second_b=strstr(c,"tail")?2:1;
+  two_case=strstr(c,"reject")?2:strstr(c,"both")?3:1;
+  if(two_case==1)copy_index=1;
+  bool ok=esb_relay_control_window(100);
+  assert(ok==(two_case!=3));assert(control_missed==(two_case==3));
+  assert(!claimed && !depth && !clock_users);puts(c);return 0;
+ }
  bool early=clock_fail||init_fail||wait_fail||busy_attempts==100||edge_wait_fail;
  bool result=esb_relay_control_window(100);
  assert(result==!(early||timeout||take_fail||stamp_fail||reject));
@@ -105,3 +117,6 @@ with tempfile.TemporaryDirectory(prefix='relay-control-', dir='/tmp') as tmp:
         str(path), '-o', str(binary)], check=True)
     for case in sys.argv[1:] or ('setup-work','scan-delay','wait-edge','prepare-irq','completed-late','scan','valid','busy','deadline','no-clock','clock','init','wait','no-end','crc','stamp','reject'):
         subprocess.run([str(binary), case], check=True)
+
+    for case in ('two-adjacent','two-tail','two-reject-adjacent','two-reject-tail','two-both-adjacent','two-both-tail','two-short-tail','two-both-short-tail'):
+        subprocess.run([str(binary),case],check=True)

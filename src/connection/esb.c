@@ -2271,6 +2271,10 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	/* Hardware END is one B airtime after the preamble the receiver stamps. */
 	uint32_t local = (uint32_t)net_ticks_from_kernel64(kernel_ticks_extend32(frame->end_kernel_ticks));
 	uint32_t preamble_local = local - RELAY_V3_CONTROL_AIR_TICKS;
+	if (frame->data[0] == 0xecU) {
+		preamble_local
+			-= relay_second_b_offset(control.direct_count, control.repair_count, control.slot_ticks, control.second_b);
+	}
 	uint32_t offset = control.preamble_ticks - preamble_local;
 	uint32_t elapsed = preamble_local - sync_filter.last_local_ticks;
 	int64_t product = (int64_t)sync_filter.skew_ppb * elapsed;
@@ -2414,6 +2418,26 @@ bool esb_relay_control_window(uint32_t start)
 	bool accepted = false;
 	bool ended = false;
 	uint32_t end = start + RELAY_RX_LEAD_TICKS + RELAY_V3_SLOT_TICKS;
+	if (relay_geometry_current()->second_b) {
+		end += relay_second_b_offset(
+			RELAY_V3_DIRECT_SLOTS,
+			4U,
+			RELAY_V3_SLOT_TICKS,
+			relay_geometry_current()->second_b
+		);
+		/* A tail copy may use fewer R slots than the last received B. Cover
+		 * the announced frame, but never listen across the next known D0. */
+		for (unsigned i = 1; i <= 3; i++) {
+			uint32_t next;
+			if (relay_runtime_start(&relay_direct_anchor, relay_direct_anchor.frame + i, &next)
+				&& (int32_t)(next - start) > 0) {
+				if ((int32_t)(end - next) > 0) {
+					end = next;
+				}
+				break;
+			}
+		}
+	}
 	/* After three missed Bs the next R is unknown. Listen continuously for
 	 * one maximum-length frame, with poses still fenced by the anchor.
 	 * This also acquires the cap when joining a private runtime layout. */
@@ -2452,10 +2476,46 @@ bool esb_relay_control_window(uint32_t start)
 				if (!relay_radio_stop()) { esb_relay_clock(false); return false; }
 				esb_raw_rx_end();
 				accepted = esb_relay_control_receive(&frame);
+				if (!accepted && relay_geometry_current()->second_b && frame.data[0] != 0xecU) {
+					key = irq_lock();
+					bool claimed_again = esb_raw_rx_begin();
+					bool resumed
+						= claimed_again && relay_radio_prepare(radio_channel, BIT(1), true) && relay_radio_receive();
+					irq_unlock(key);
+					if (resumed) {
+						continue;
+					}
+					(void)relay_radio_stop();
+					if (claimed_again) {
+						esb_raw_rx_end();
+					}
+				}
 				control_missed += !accepted;
 				control_open_hist[open_lag][!accepted]++;
 				esb_relay_clock(false);
 				return accepted;
+			}
+			if (relay_geometry_current()->second_b) {
+				if (!relay_radio_stop()) {
+					esb_relay_clock(false);
+					return false;
+				}
+				esb_raw_rx_end();
+				key = irq_lock();
+				bool claimed_again = esb_raw_rx_begin();
+				bool resumed
+					= claimed_again && relay_radio_prepare(radio_channel, BIT(1), true) && relay_radio_receive();
+				irq_unlock(key);
+				if (resumed) {
+					continue;
+				}
+				(void)relay_radio_stop();
+				if (claimed_again) {
+					esb_raw_rx_end();
+				}
+				control_missed++;
+				esb_relay_clock(false);
+				return false;
 			}
 			break;
 		}

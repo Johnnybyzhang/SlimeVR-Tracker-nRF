@@ -37,7 +37,7 @@ PREFIX = r'''
 #include <string.h>
 #define CONFIG_RELAY_RUNTIME_LAYOUT 1
 #include "relay_protocol.h"
-static struct relay_geometry geometry={11,5,16,120,4096,15};
+static struct relay_geometry geometry={11,5,16,120,4096,15, 0};
 const struct relay_geometry *relay_geometry_active=&geometry;
 struct relay_timeline relay_timeline_active;
 struct relay_runtime_anchor relay_direct_anchor;
