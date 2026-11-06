@@ -919,6 +919,23 @@ rsource "Kconfig.heater"
 
 source "Kconfig.zephyr"
 
+config RELAY_FRAME_LEDGER
+    bool "Bounded per-frame relay ledger"
+    depends on CONNECTION_RELAY
+    default n
+    help
+        Retain local relay events in RAM for post-capture console inspection.
+        Diagnostic images only; no logging or formatting in radio paths.
+
+config RELAY_LEDGER_TIMING
+    bool "Detailed relay ledger timing probes"
+    depends on RELAY_FRAME_LEDGER && CPU_CORTEX_M_HAS_DWT
+    default n
+    help
+        Record source and repair phase cycles and helper RX startup time.
+        Adds clock reads in tight radio paths; leave disabled for recovery
+        acceptance measurements. Frame and refusal events remain available.
+
 config RELAY_CYCLE_DIAGNOSTICS
     bool "Detailed relay CPU cycle diagnostics"
     depends on CPU_CORTEX_M_HAS_DWT

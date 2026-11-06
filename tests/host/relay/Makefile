@@ -8,7 +8,9 @@ check:
 	$(TMP)/b2_deadline
 	python3 run_peak.py
 	python3 run_layout_failure.py
+	python3 run_ledger_console.py
 	CC="$(CC)" python3 run_quiesce.py
+	CC="$(CC)" python3 run_ledger_mask.py
 	$(CC) $(CFLAGS) test_link.c -o $(TMP)/test_link
 	$(TMP)/test_link
 	CC="$(CC)" python3 run_tdma.py
@@ -21,6 +23,7 @@ check:
 	CC="$(CC)" python3 run_capture_time.py
 	CC="$(CC)" python3 run_submission.py
 	CC="$(CC)" python3 run_source_guard.py
+	CC="$(CC)" python3 run_ledger.py
 	CC="$(CC)" python3 run_producer.py
 	python3 budget.py
 	python3 check_protocol_sync.py

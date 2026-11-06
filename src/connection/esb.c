@@ -60,6 +60,9 @@ int16_t ledger_window_detail, ledger_wait_lateness, ledger_repair_wait_lateness,
 
 #include <stdlib.h>
 #include "esb.h"
+#ifdef CONFIG_RELAY_FRAME_LEDGER
+volatile uint8_t relay_test_bdrop;
+#endif
 #include "network_ticks.h"
 #include "tdma.h"
 #include "relay_timing.h"
@@ -2263,6 +2266,21 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 		control_repeat_reject[0] += repeat;
 		return false;
 	}
+#ifdef CONFIG_RELAY_FRAME_LEDGER
+	if (relay_test_bdrop) {
+		ledger_note(
+			control.session,
+			control.frame,
+			tracker_id,
+			41,
+			relay_test_bdrop,
+			control.repair_count,
+			relay_control_next2_repairs(&control)
+		);
+		relay_test_bdrop--;
+		return false;
+	}
+#endif
 	if (!tdma_layout_get(&layout) || layout.profile != RELAY_PROFILE_120HZ) {
 		control_reject[1]++;
 		control_repeat_reject[1] += repeat;

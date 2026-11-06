@@ -2331,10 +2331,54 @@ static void console_cmd_ping(size_t argc, char **argv)
 }
 
 #if CONFIG_CONNECTION_RELAY
+/* Console feedback is retained even when ledger event calls compile away. */
+static void console_relay_ledger(const char *text, bool mask)
+{
+#ifdef CONFIG_RELAY_FRAME_LEDGER
+	if (!mask && strcmp(text, "dump") == 0) {
+		ledger_command(-1);
+		return;
+	}
+	char *end;
+	unsigned long value = strtoul(text, &end, 0);
+	if (!*text || *end || value > (mask ? UINT16_MAX : RELAY_MAX_TRACKERS - 1U)) {
+		printk("LEDGER invalid %s\n", mask ? "mask" : "child");
+		return;
+	}
+	if (mask) {
+		ledger_command_mask((uint16_t)value);
+	} else {
+		ledger_command((int)value);
+	}
+#else
+	(void)text;
+	(void)mask;
+	printk("ledger unavailable in this image\n");
+#endif
+}
+
 static void console_cmd_relay(size_t argc, char **argv)
 {
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
+#ifdef CONFIG_RELAY_FRAME_LEDGER
+	if (argc == 3 && !strcmp(argv[1], "bdrop")) {
+		extern volatile uint8_t relay_test_bdrop;
+		int n = atoi(argv[2]);
+		if (n >= 0 && n <= 8) {
+			relay_test_bdrop = n;
+			printk("B decode misses armed: %u\n", relay_test_bdrop);
+		}
+		return;
+	}
+#endif
+
+	if (argc == 3 && strcmp(argv[1], "ledgermask") == 0) {
+		console_relay_ledger(argv[2], true);
+		return;
+	}
+	if (argc == 3 && strcmp(argv[1], "ledger") == 0) {
+		console_relay_ledger(argv[2], false);
+		return;
+	}
 	relay_print_status();
 }
 #endif
