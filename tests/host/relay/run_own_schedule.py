@@ -40,7 +40,7 @@ static bool tdma_update_config(uint8_t slot,uint8_t total,uint8_t width,uint8_t 
 static void relay_reset(void){}
 static void connection_request_ping_resync(void){resync++;}
 static void atomic_set(unsigned *p,unsigned v){*p=v;}
-struct relay_pong_trailer {bool pending;};
+#include "relay_protocol.h"
 static struct relay_pong_trailer own_trailer;
 static bool own_trailer_valid=true,layout_confirm_seen;
 static uint32_t layout_confirm_time,staged_t2,stage_calls;
@@ -59,6 +59,24 @@ int main(int argc,char **argv){
   assert(!layout_stale && layout_confirm_seen);
   p.data[8]=255;receive_schedule(&p,ESB_PONG_FLAG_NORMAL);
   assert(!enabled && layout_stale && resync==1 && updates==0);
+ }else if(!strcmp(argv[1],"private-bootstrap")){
+  const struct relay_geometry cases[]={{11,5,16,120,4096,15},{16,3,15,120,300,1}};
+  for(unsigned row=0;row<sizeof(cases)/sizeof(cases[0]);row++){
+   channel_wait_normal=true;channel_found=0;enabled=false;profile=false;updates=0;
+   p.data[9]=11;p.data[10]=cases[row].slot_ticks;
+   own_trailer.pending=true;own_trailer.pending_total=relay_geometry_code(cases[row].direct,cases[row].repairs);
+   own_trailer.pending_slot_ticks=cases[row].slot_ticks;own_trailer.pending_epoch=7;
+   layout_confirm_time=0;layout_confirm_seen=false;
+   receive_schedule(&p,ESB_PONG_FLAG_NORMAL);
+   assert(channel_found && stage_calls && updates==0 && resync==0);
+   /* Boot took longer than one layout lease. Acquisition must remain alive
+    * without confirming any pose grant before the first B. */
+   assert(layout_confirm_time==4242 && !layout_confirm_seen && layout_stale);
+  }
+ }else if(!strcmp(argv[1],"private-width")){
+  p.data[10]=15;own_trailer.pending=true;own_trailer.pending_total=relay_geometry_code(3,3);own_trailer.pending_slot_ticks=15;own_trailer.pending_epoch=7;
+  receive_schedule(&p,ESB_PONG_FLAG_NORMAL);assert(resync==0);
+  own_trailer.pending=false;receive_schedule(&p,ESB_PONG_FLAG_NORMAL);assert(resync==1);
  }else if(!strcmp(argv[1],"unassigned")){
   p.data[8]=255;p.data[11]=8;receive_schedule(&p,ESB_PONG_FLAG_NORMAL);
   assert(layout_stale && !enabled && resync==1);
@@ -83,6 +101,6 @@ with tempfile.TemporaryDirectory(prefix="relay-own-schedule-",dir="/tmp") as tmp
     c.write_text(PREFIX+constant+'\nstatic void receive_schedule(const struct esb_payload *payload,uint8_t pong_flags){\n'+schedule+'\n}\n'+CASES)
     subprocess.run(shlex.split(os.environ.get("CC","cc"))+[
         "-std=c11","-Wall","-Wextra","-Werror","-Wno-unused-function",
-        "-g","-O1","-fsanitize=address,undefined",str(c),"-o",str(exe)],check=True)
-    for case in sys.argv[1:] or ("profile","unassigned","same-epoch-recovery","stage-before-withdraw","no-trailer-no-grant"):
+        "-I"+str(ROOT/"src/connection"),"-g","-O1","-fsanitize=address,undefined",str(c),"-o",str(exe)],check=True)
+    for case in sys.argv[1:] or ("profile","private-bootstrap","private-width","unassigned","same-epoch-recovery","stage-before-withdraw","no-trailer-no-grant"):
         subprocess.run([str(exe),case],check=True)

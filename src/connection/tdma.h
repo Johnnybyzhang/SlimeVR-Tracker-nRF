@@ -171,7 +171,9 @@ bool tdma_layout_withdrawn(void);
 /** Snapshot of the receiver-assigned layout (valid only while TDMA is enabled). */
 uint8_t tdma_profile_get(void);
 void tdma_profile_drop(void);
+struct relay_control;
 void tdma_stream_anchor(uint32_t preamble, uint32_t frame);
+void tdma_stream_control(const struct relay_control *control);
 bool tdma_stream_next(uint32_t *target, bool *broadcast);
 
 struct tdma_layout {

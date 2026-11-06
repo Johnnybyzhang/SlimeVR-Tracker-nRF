@@ -45,6 +45,7 @@ PREFIX = r'''
 #define TDMA_SLOT_TICKS 22
 #define TDMA_FRAME_TICKS (TDMA_NUM_TRACKERS * TDMA_SLOT_TICKS)
 #define CONFIG_CONNECTION_TDMA 1
+#define CONFIG_RELAY_RUNTIME_LAYOUT 1
 #define K_USEC(x) ((uint64_t)(x))
 typedef int64_t atomic_t;
 typedef int64_t atomic_val_t;
@@ -80,7 +81,7 @@ static void set_ticks(uint32_t ticks) { virtual_us = ((uint64_t)ticks * 1000000 
 def main():
     parts = [PREFIX, "#include \"frame_ledger.h\"\nint16_t ledger_window_detail, ledger_wait_lateness;",
              (root / "src/connection/relay_protocol.h").read_text(),
-             "static bool granted = true; static bool esb_layout_granted(void) { return granted; } static bool esb_relay_granted_at(uint32_t tick) { (void)tick; return granted; }",
+             "static bool granted = true; static bool esb_layout_granted(void) { return granted; } bool esb_relay_granted_at(uint32_t tick);",
              function(network_ticks, "net_ticks_to_us_ceil64"),
              function(network_ticks, "net_ticks_to_ms_ceil32"),
              function(network_ticks, "net_ticks_to_ms_floor32"),
@@ -94,6 +95,7 @@ def main():
              function(tdma, "tdma_update_config"),
              tdma[tdma.index("bool tdma_stage_config("):tdma.index("bool tdma_layout_get(")],
              tdma[tdma.index("bool tdma_layout_get("):]]
+    parts.append("bool esb_relay_granted_at(uint32_t tick) { return granted && relay_runtime_direct_granted(&relay_direct_anchor, tick); }")
     parts.append((HERE / "tdma_cases.c").read_text())
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "tdma.c"

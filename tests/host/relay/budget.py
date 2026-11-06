@@ -11,6 +11,7 @@ admission to TX enable. These allowances are not hardware measurements.
 from pathlib import Path
 import re
 import sys
+import tempfile, subprocess, os, shlex
 
 HERE = Path(__file__).resolve().parent
 TRACKER = HERE.parents[2]
@@ -166,16 +167,23 @@ def main():
     check(p["RELAY_LAYOUT_ACTIVATION_MS"] >= 3 * ping_interval,
           f"each tracker gets {p['RELAY_LAYOUT_ACTIVATION_MS'] // ping_interval} own PONGs to learn a pending layout")
 
-    v3 = consts(TRACKER / "src/connection/relay_protocol.h", [
-        "RELAY_V3_SLOT_TICKS", "RELAY_V3_DIRECT_SLOTS", "RELAY_V3_REPAIR_SLOTS",
-        "RELAY_V3_DIRECT_MAX", "RELAY_V3_LAST_DIRECT_MAX"])
+    # Evaluate the shared table rather than duplicating its layout arithmetic.
+    names = ["RELAY_V3_SLOT_TICKS", "RELAY_V3_DIRECT_SLOTS", "RELAY_V3_REPAIR_SLOTS",
+             "RELAY_V3_DIRECT_MAX", "RELAY_V3_LAST_DIRECT_MAX", "RELAY_V3_GRID_TICKS", "RELAY_V3_GRID_FRAMES"]
+    with tempfile.TemporaryDirectory() as temporary:
+        source = Path(temporary) / "geometry.c"
+        binary = Path(temporary) / "geometry"
+        source.write_text('#include <stdio.h>\n#include "relay_protocol.h"\nint main(void) {\n' +
+            ''.join(f'printf("%u\\n", (unsigned){name});\n' for name in names) + '}\n')
+        subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + ['-I', str(TRACKER / 'src/connection'), str(source), '-o', str(binary)], check=True)
+        v3 = dict(zip(names, map(int, subprocess.check_output([str(binary)], text=True).split())))
     s3 = v3["RELAY_V3_SLOT_TICKS"]
     latest32 = (s3 - t["TDMA_LEN18_32_RESERVE_TICKS"]) * TICK_US
     latest32 += CALL_LATENCY_US + RAMP_US + airtime_us(v3["RELAY_V3_LAST_DIRECT_MAX"])
     earliest_b = (s3 + t["TDMA_SLOT_TARGET_OFFSET"] - SYNC_ERROR_TICKS) * TICK_US + RAMP_US
     for mcu, disable in (("nRF52840", 4), ("nRF54L15", 2)):
         check(latest32 + disable + RAMP_US + RX_SETTLE_US <= earliest_b,
-              f"v3 D10->B {mcu}: {earliest_b - latest32 - disable - RAMP_US - RX_SETTLE_US:.3f} us slack")
+              f"v3 last direct->B {mcu}: {earliest_b - latest32 - disable - RAMP_US - RX_SETTLE_US:.3f} us slack")
     b_end = t["TDMA_SLOT_TARGET_OFFSET"] * TICK_US + RAMP_US + airtime_us(72)
     r0_preamble = (s3 + t["TDMA_SLOT_TARGET_OFFSET"]) * TICK_US + RAMP_US
     check(r0_preamble - b_end - SYNC_ERROR_TICKS * TICK_US >= TURNAROUND_US,
@@ -183,13 +191,13 @@ def main():
     r0_admission = (s3 + t["TDMA_SLOT_TARGET_OFFSET"]) * TICK_US
     check(r0_admission - b_end >= 60, "v3 B decode and ownership transfer have 60 us")
     worst = 0
-    for phase in range(15):
-        start = lambda frame: (frame * 4096) // 15
+    for phase in range(v3["RELAY_V3_GRID_FRAMES"]):
+        start = lambda frame: (frame * v3["RELAY_V3_GRID_TICKS"]) // v3["RELAY_V3_GRID_FRAMES"]
         for source in range(v3["RELAY_V3_DIRECT_SLOTS"]):
             original = start(phase) + source * s3 + t["TDMA_SLOT_TARGET_OFFSET"]
             for repair in range(v3["RELAY_V3_REPAIR_SLOTS"]):
                 for age in range(3):
-                    finish = start(phase + age) + (12 + repair) * s3
+                    finish = start(phase + age) + (v3["RELAY_V3_DIRECT_SLOTS"] + 1 + repair) * s3
                     finish += s3 - t["TDMA_LEN33_PLUS_RESERVE_TICKS"]
                     delay = (finish - original) * TICK_US + CALL_LATENCY_US + airtime_us(72)
                     delay += SYNC_ERROR_TICKS * TICK_US

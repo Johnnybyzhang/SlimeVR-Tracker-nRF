@@ -29,6 +29,12 @@ struct relay_rx_frame {
  * after the caller copies each packet in relay_radio_poll(). */
 bool relay_radio_start(uint8_t channel, uint8_t pipe_mask, bool single);
 
+/* Split startup for a scheduled edge. The caller retains raw RX arbitration
+ * until stop, including any wait between these calls. Prepare leaves RADIO
+ * disabled; receive only triggers RXEN. stop also cancels an unstarted prepare. */
+bool relay_radio_prepare(uint8_t channel, uint8_t pipe_mask, bool single);
+bool relay_radio_receive(void);
+
 /* Continuous mode: returns true and fills frame for each CRC-valid packet. */
 bool relay_radio_poll(struct relay_rx_frame *frame);
 

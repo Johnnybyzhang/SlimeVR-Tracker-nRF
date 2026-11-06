@@ -2027,6 +2027,15 @@ static void connection_thread(void)
 					}
 				}
 				relay_control_serviced();
+				/* Without a B grant tdma_stream_next() returns "now" on
+				 * every retry. A full-frame busy RX, or an immediate radio
+				 * refusal, otherwise keeps this priority-4 thread runnable
+				 * indefinitely and starves boot/POWER/ESB owners. Release
+				 * the radio and helper handoff before giving them CPU time.
+				 * Granted streaming retains its existing slot timing. */
+				if (!esb_layout_granted()) {
+					k_msleep(1);
+				}
 				continue;
 			}
 			stream_target = target;

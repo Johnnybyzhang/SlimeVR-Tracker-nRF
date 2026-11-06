@@ -939,3 +939,7 @@ config RELAY_IRQ_DIAGNOSTICS
     help
         Diagnostic-only DWT maxima for complete source or coordinator locks.
         Retains all production guards. Never enable for acceptance images.
+
+config RELAY_RUNTIME_LAYOUT
+    bool
+    default y

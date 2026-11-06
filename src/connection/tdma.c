@@ -56,6 +56,11 @@ static uint8_t tdma_slot_index_init; /* used only before first dyn config */
 #define TDMA_STAGED_BIT 0x40U
 #define TDMA_STAGED_UNASSIGNED 0x20U
 static atomic_t tdma_staged_pack;
+static struct relay_geometry tdma_active_geometry = {16, 1, 16, 120, 288, 1};
+static struct relay_geometry tdma_staged_geometry;
+const struct relay_geometry *relay_geometry_active = &tdma_active_geometry;
+struct relay_timeline relay_timeline_active;
+struct relay_runtime_anchor relay_direct_anchor;
 static uint32_t tdma_profile_origin;
 static uint32_t tdma_anchor_frame, tdma_anchor_start;
 static atomic_t tdma_staged_activation; /* receiver ticks */
@@ -190,19 +195,22 @@ static void tdma_promote_staged(void)
 	}
 	unsigned key = irq_lock();
 	if ((uint32_t)atomic_get(&tdma_staged_pack) == staged) {
-		/* B anchors the origin once the profile runs; the receiver keeps
-		 * its grid across layouts. */
-		if (!((uint32_t)atomic_get(&tdma_cfg_pack) & TDMA_PROFILE_BIT)) {
-			tdma_profile_origin = (uint32_t)atomic_get(&tdma_staged_activation);
-			tdma_anchor_frame = 0;
-			tdma_anchor_start = tdma_profile_origin;
-		}
+		/* Every activation begins a new geometry timeline. B supplies the
+		 * authoritative frame number and two announced future starts. */
+		tdma_profile_origin = (uint32_t)atomic_get(&tdma_staged_activation);
+		tdma_anchor_frame = 0;
+		tdma_anchor_start = tdma_profile_origin;
+		relay_timeline_clear(&relay_timeline_active);
+		relay_direct_anchor.valid = false;
 		atomic_set(&tdma_staged_pack, 0);
 		if (staged & TDMA_STAGED_UNASSIGNED) {
 			atomic_set(&tdma_cfg_pack, (atomic_val_t)((uint32_t)atomic_get(&tdma_cfg_pack)
 				& ~TDMA_ENABLED_BIT));
 			atomic_set(&tdma_withdrawn, 1);
 		} else {
+			if (staged & TDMA_PROFILE_BIT) {
+				tdma_active_geometry = tdma_staged_geometry;
+			}
 			atomic_set(&tdma_cfg_pack, (atomic_val_t)((staged & ~(TDMA_STAGED_BIT | TDMA_STAGED_UNASSIGNED))
 				| TDMA_ENABLED_BIT));
 			atomic_set(&tdma_withdrawn, 0);
@@ -225,6 +233,10 @@ static bool tdma_config_snapshot(struct tdma_config *config)
 	config->slot_ticks = TDMA_UNPACK_STICKS(config->pack);
 	config->frame_ticks = TDMA_UNPACK_FRAME(config->pack);
 	config->total_slots = TDMA_UNPACK_TOTAL(config->pack);
+	if (config->pack & TDMA_PROFILE_BIT) {
+		config->total_slots = RELAY_V3_TOTAL_SLOTS;
+		config->frame_ticks = RELAY_V3_FRAME_TICKS_MAX;
+	}
 	return (config->pack & TDMA_ENABLED_BIT) && config->total_slots != 0;
 }
 
@@ -483,6 +495,30 @@ void tdma_stream_anchor(uint32_t preamble, uint32_t frame)
 	tdma_profile_origin = relay_control_origin(preamble, frame);
 }
 
+void tdma_stream_control(const struct relay_control *control)
+{
+	(void)relay_geometry_make(
+		&tdma_active_geometry,
+		control->direct_count,
+		control->repair_count,
+		control->slot_ticks,
+		control->tps_max
+	);
+	relay_runtime_anchor_set(
+		&relay_direct_anchor,
+		control->frame,
+		control->preamble_ticks,
+		control->direct_count,
+		control->repair_count,
+		relay_control_next_repairs(control),
+		relay_control_next2_repairs(control),
+		control->slot_ticks,
+		control->tps_max
+	);
+	relay_timeline_announce(&relay_timeline_active, &relay_direct_anchor);
+	tdma_stream_anchor(control->preamble_ticks, control->frame);
+}
+
 /* Next tick at `offset` into a frame, at or after now. */
 static uint32_t tdma_stream_at(uint32_t now, uint32_t offset)
 {
@@ -499,6 +535,13 @@ bool tdma_stream_next(uint32_t *target, bool *broadcast)
 	struct esb_network_clock clock;
 	if (!esb_get_network_clock(&clock)) {
 		return false;
+	}
+	/* An exhausted announcement fences TX, but acquisition keeps listening.
+	 * It must not spend a PING interval silent after an ordinary B pair loss. */
+	if (!relay_direct_anchor.valid || !relay_runtime_direct_granted(&relay_direct_anchor, clock.receiver_ticks)) {
+		*broadcast = true;
+		*target = clock.receiver_ticks;
+		return true;
 	}
 	uint8_t slot = TDMA_UNPACK_SLOT((uint32_t)atomic_get(&tdma_cfg_pack));
 	uint32_t own = tdma_stream_at(clock.receiver_ticks,
@@ -945,6 +988,8 @@ void tdma_set_enabled(bool enabled)
 void tdma_profile_drop(void)
 {
 	tdma_set_enabled(false);
+	relay_timeline_clear(&relay_timeline_active);
+	relay_direct_anchor.valid = false;
 	unsigned key = irq_lock();
 	atomic_set(&tdma_cfg_pack, (atomic_val_t)((uint32_t)atomic_get(&tdma_cfg_pack) & ~TDMA_PROFILE_BIT));
 	irq_unlock(key);
@@ -1068,19 +1113,30 @@ bool tdma_update_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ti
 bool tdma_stage_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_ticks, uint8_t epoch,
 	uint32_t activation_ticks)
 {
-	bool profile = total_slots == (0x80U | RELAY_PROFILE_120HZ);
+	struct relay_geometry decoded;
+	bool profile = (total_slots & 0x80U) != 0;
+	const struct relay_geometry *geometry = &decoded;
+	if (profile && !relay_geometry_from_bootstrap(total_slots, slot_ticks, &decoded)) {
+		return false;
+	}
 	bool unassigned = slot_index == TDMA_SLOT_UNASSIGNED;
-	if (total_slots == 0 || (!profile && total_slots > TDMA_MAX_TRACKERS) || slot_ticks < TDMA_MIN_SAFE_SLOT_TICKS
-	    || (profile && (slot_ticks != RELAY_V3_SLOT_TICKS || slot_index >= RELAY_V3_DIRECT_SLOTS))
-	    || (!unassigned && !profile && slot_index >= total_slots)) {
+	if (total_slots == 0 || (!profile && total_slots > TDMA_MAX_TRACKERS)
+		|| (!profile && slot_ticks < TDMA_MIN_SAFE_SLOT_TICKS)
+		|| (profile && !unassigned && slot_index >= geometry->direct)
+		|| (!unassigned && !profile && slot_index >= total_slots)) {
 		return false;
 	}
 #if CONFIG_CONNECTION_TDMA
 	struct esb_network_clock clock;
 	int32_t lead = esb_get_network_clock(&clock) ? (int32_t)(activation_ticks - clock.receiver_ticks) - 2 : 0;
 	uint64_t local = lead > 0 ? clock.local_kernel_ticks + k_us_to_ticks_floor64(net_ticks_to_us_ceil64(lead)) : 0;
-	uint32_t pack = TDMA_PACK(unassigned ? 0 : slot_index, slot_ticks, profile ? RELAY_V3_TOTAL_SLOTS : total_slots, epoch)
-		| (profile ? TDMA_PROFILE_BIT : 0U) | TDMA_STAGED_BIT | (unassigned ? TDMA_STAGED_UNASSIGNED : 0U);
+	uint32_t pack = TDMA_PACK(
+						unassigned ? 0 : slot_index,
+						slot_ticks,
+						profile ? geometry->direct + 1U + geometry->repairs : total_slots,
+						epoch
+					)
+				  | (profile ? TDMA_PROFILE_BIT : 0U) | TDMA_STAGED_BIT | (unassigned ? TDMA_STAGED_UNASSIGNED : 0U);
 	unsigned key = irq_lock();
 	/* The receiver keeps announcing a running profile for joiners. */
 	if ((uint32_t)atomic_get(&tdma_cfg_pack)
@@ -1090,6 +1146,9 @@ bool tdma_stage_config(uint8_t slot_index, uint8_t total_slots, uint8_t slot_tic
 	}
 	if ((uint32_t)atomic_get(&tdma_staged_pack) != pack
 	    || (uint32_t)atomic_get(&tdma_staged_activation) != activation_ticks) {
+		if (profile) {
+			tdma_staged_geometry = decoded;
+		}
 		atomic_set(&tdma_staged_activation, (atomic_val_t)activation_ticks);
 		tdma_staged_local = local;
 		atomic_set(&tdma_staged_pack, (atomic_val_t)pack);
@@ -1160,7 +1219,21 @@ bool tdma_slot_data_window(uint8_t slot, uint32_t after, uint32_t *start)
 		return false;
 	}
 	if (tdma_profile_get()) {
-		*start = tdma_stream_at(after + 1U, slot * RELAY_V3_SLOT_TICKS);
+		uint32_t frame = relay_frame_near(tdma_anchor_frame, tdma_anchor_start, after + 1U);
+		uint32_t known;
+		if (!relay_runtime_start(&relay_direct_anchor, frame, &known)) {
+			return false;
+		}
+		uint32_t candidate = known + slot * RELAY_V3_SLOT_TICKS;
+		if ((int32_t)(candidate - after) <= 0) {
+			if (!relay_runtime_start(&relay_direct_anchor, frame + 1U, &known)) {
+				return false;
+			}
+			candidate = known + slot * RELAY_V3_SLOT_TICKS;
+		}
+		/* A helper cannot infer f+3 from a stale fixed grid. Leave the
+		 * radio to B acquisition when both announced starts are spent. */
+		*start = candidate;
 		return !tdma_window_quiet(*start, RELAY_V3_SLOT_TICKS);
 	}
 	uint32_t frame = after / config.frame_ticks;

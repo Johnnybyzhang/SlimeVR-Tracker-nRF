@@ -1550,15 +1550,16 @@ bool esb_receiver_relay_aware(void)
 /* Caller has already selected v3 and sampled the network clock. */
 static inline bool esb_v3_lease_at(uint32_t receiver_ticks)
 {
-	return control_seen
-		&& (uint32_t)(receiver_ticks - control_tick) <= RELAY_V3_CACHE_FRAMES * RELAY_V3_FRAME_TICKS_MAX
+	return control_seen && relay_timeline_active.valid
+		&& relay_runtime_direct_granted(&relay_direct_anchor, receiver_ticks)
 		&& (uint32_t)(k_uptime_get_32() - layout_confirm_time) < RELAY_LAYOUT_GRANT_MS;
 }
 
 /* V3 admission already has a network-clock sample. Validate its lease without
  * projecting the same clock again inside the slot's final check. */
 #if defined(__GNUC__) && !defined(__clang__)
-/* Attribute provenance: Round 10 grant/source/repair cohorts and round 11 acceptance retained this group; no isolated attribute-only saving is established. Keep pending A/B. */
+/* Attribute provenance: Round 10 grant/source/repair cohorts and round 11 acceptance retained this group; no isolated
+ * attribute-only saving is established. Keep pending A/B. */
 __attribute__((optimize("O3")))
 #endif
 bool esb_relay_granted_at(uint32_t receiver_ticks)
@@ -1575,7 +1576,7 @@ __attribute__((optimize("O3")))
 #endif
 bool esb_layout_granted(void)
 {
-	if (tdma_layout_withdrawn()) {
+	if (tdma_layout_withdrawn() || layout_stale) {
 		return false;
 	}
 	if (tdma_profile_get()) {
@@ -2003,8 +2004,13 @@ static void esb_receive_pong(const struct esb_payload *payload)
 				/* A v3 join needs receiver time, not the ACK-delay-biased
 				 * legacy reference. Match PING TX END to receiver PING RX;
 				 * the SDK retains the successful attempt across retries. */
-				if (own_trailer_valid && own_trailer.pending &&
-				    own_trailer.pending_total == (0x80U | RELAY_PROFILE_120HZ)) {
+				struct relay_geometry bootstrap;
+				if (own_trailer_valid && own_trailer.pending
+					&& relay_geometry_from_bootstrap(
+						own_trailer.pending_total,
+						own_trailer.pending_slot_ticks,
+						&bootstrap
+					)) {
 					uint32_t tx_end = (uint32_t)net_ticks_from_kernel64(
 						kernel_ticks_extend32(esb_last_ack_tx_end_ticks));
 					server_offset_ticks = ping_rx_ticks - tx_end;
@@ -2063,16 +2069,43 @@ static void esb_receive_pong(const struct esb_payload *payload)
 			/* An authoritative unassigned/invalid tuple withdraws our old
 			 * transmission rights. Ignoring it leaves an evicted tracker
 			 * transmitting in a slot that can already belong to a peer. */
-			if (tdma_total == 0 || tdma_total > TDMA_MAX_TRACKERS
-			    || tdma_slot >= tdma_total || tdma_sticks < 16) {
+			struct relay_geometry bootstrap;
+			const struct relay_geometry *private_geometry = own_trailer_valid && own_trailer.pending
+																 && relay_geometry_from_bootstrap(
+																	 own_trailer.pending_total,
+																	 own_trailer.pending_slot_ticks,
+																	 &bootstrap
+																 )
+															  ? &bootstrap
+															  : NULL;
+			if (private_geometry) {
+				/* Acquisition gets a fresh lease even after a slow boot. This
+				 * timestamp does not grant poses; only B validates the anchor. */
+				layout_confirm_time = k_uptime_get_32();
+				if (!tdma_profile_get()) {
+					layout_stale = true;
+				}
+			}
+			/* A running private receiver advertises its legacy member tuple too.
+			 * That tuple cannot enable acquisition at a private width. The
+			 * validated announcement staged above is the joiner's schedule. */
+			if (private_geometry && server_time_synced && channel_wait_normal) {
+				atomic_set(&channel_found, true);
+			}
+			bool private_width = (tdma_profile_get() && tdma_sticks == RELAY_V3_SLOT_TICKS)
+							  || (private_geometry && tdma_sticks == private_geometry->slot_ticks
+								  && tdma_epoch == own_trailer.pending_epoch);
+			if (tdma_total == 0 || tdma_total > TDMA_MAX_TRACKERS || tdma_slot >= tdma_total
+				|| (tdma_sticks < 16 && !private_width)) {
 				layout_stale = true;
 				tdma_set_enabled(false);
 				relay_reset();
 				connection_request_ping_resync();
 				return;
 			}
-			if (!tdma_profile_get() && (channel_wait_normal || layout_stale || !tdma_is_enabled()
-			    || tdma_epoch != tdma_get_config_epoch())) {
+			if (!private_geometry && !tdma_profile_get()
+				&& (channel_wait_normal || layout_stale || !tdma_is_enabled()
+					|| tdma_epoch != tdma_get_config_epoch())) {
 				bool valid_schedule = tdma_update_config(
 					tdma_slot, tdma_total, tdma_sticks, tdma_epoch
 				);
@@ -2080,7 +2113,7 @@ static void esb_receive_pong(const struct esb_payload *payload)
 					atomic_set(&channel_found, true);
 				}
 			}
-			if (tdma_epoch == tdma_get_config_epoch()) {
+			if (!private_geometry && tdma_epoch == tdma_get_config_epoch()) {
 				layout_stale = false;
 				/* Only a trailer-bearing PONG confirms: it would also have
 				 * carried any pending layout, so a grant never outlives an
@@ -2204,6 +2237,9 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	struct relay_control control;
 	struct tdma_layout layout;
 	if (frame->pipe != 1 || !relay_control_decode(frame->data, frame->length, &control)) {
+		if (frame->pipe == 1 && frame->length == RELAY_CONTROL_LEN && frame->data[0] == RELAY_CONTROL_V3) {
+			tdma_profile_drop();
+		}
 		control_reject[0]++;
 		return false;
 	}
@@ -2211,7 +2247,8 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 		control_reject[1]++;
 		return false;
 	}
-	if (control.epoch != layout.epoch) {
+	if (control.epoch != layout.epoch || control.direct_count != RELAY_V3_DIRECT_SLOTS
+		|| control.slot_ticks != layout.slot_ticks) {
 		control_reject[2]++;
 		return false;
 	}
@@ -2257,7 +2294,7 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	control_session = control.session;
 	control_frame = control.frame;
 	control_tick = control.preamble_ticks;
-	tdma_stream_anchor(control.preamble_ticks, control.frame);
+	tdma_stream_control(&control);
 	relay_on_control(&control, tracker_id);
 	control_seen = true;
 	control_received++;
@@ -2277,21 +2314,28 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	return true;
 }
 
-/* Neither B nor a PONG for a whole layout lease (receiver restarted, or v3
- * switched off before we heard B): profile 1 has no rejoin path of its own,
- * so the caller drops it and the ordinary PING path takes over. */
+/* A three-B loss fences TX and broadens B acquisition below. Only a whole
+ * layout lease without a usable private schedule returns to PING acquisition. */
 bool esb_relay_profile_lost(void)
 {
-	if (!tdma_profile_get()
-	    || (uint32_t)(k_uptime_get_32() - layout_confirm_time) < RELAY_LAYOUT_GRANT_MS) {
+	if (!tdma_profile_get() || (uint32_t)(k_uptime_get_32() - layout_confirm_time) < RELAY_LAYOUT_GRANT_MS) {
 		return false;
 	}
 	control_seen = false;
+	layout_confirm_seen = false;
+	layout_stale = true;
+	channel_wait_normal = true;
+	atomic_set(&channel_found, false);
+	connection_request_ping_resync();
 	return true;
 }
 
+/* Configuration allowance only; RXEN retains RELAY_RX_LEAD_TICKS. */
+#define RELAY_CONTROL_RX_SETUP_TICKS 2U
+
 #if defined(__GNUC__) && !defined(__clang__)
-/* Attribute provenance: Round 10 grant/source/repair cohorts and round 11 acceptance retained this group; no isolated attribute-only saving is established. Keep pending A/B. */
+/* Attribute provenance: Round 10 grant/source/repair cohorts and round 11 acceptance retained this group; no isolated
+ * attribute-only saving is established. Keep pending A/B. */
 __attribute__((optimize("O3")))
 #endif
 bool esb_relay_control_window(uint32_t start)
@@ -2305,7 +2349,10 @@ bool esb_relay_control_window(uint32_t start)
 		esb_relay_clock(false);
 		return false;
 	}
-	if (!tdma_wait_network_tick(start)) {
+	/* Setup is not RX lead: RADIO stays disabled until the unchanged start.
+	 * D10 helpers have already acquired by here, and keep ownership through
+	 * their existing capture end. A completing own D10 TX may also defer us. */
+	if (!tdma_wait_network_tick(start - RELAY_CONTROL_RX_SETUP_TICKS)) {
 		control_window_fail[1]++;
 		esb_relay_clock(false);
 		return false;
@@ -2332,8 +2379,28 @@ bool esb_relay_control_window(uint32_t start)
 	uint32_t previous_end;
 	(void)radio_capture_rx_end(&previous_end);
 	radio_capture_set_enabled(true);
-	if (!relay_radio_start(radio_channel, BIT(1), true)) {
+	if (!relay_radio_prepare(radio_channel, BIT(1), true)) {
 		irq_unlock(key);
+		esb_relay_clock(false);
+		return false;
+	}
+	irq_unlock(key);
+	if (!tdma_wait_network_tick(start)) {
+		control_window_fail[1]++;
+		(void)relay_radio_stop();
+		esb_raw_rx_end();
+		esb_relay_clock(false);
+		return false;
+	}
+	/* The wait validates the clock. Keep the successful claim's baseline
+	 * admission semantics: the deadline above applies to failed claims.
+	 * An additional post-setup cutoff would discard late but usable Bs. */
+	key = irq_lock();
+	if (!relay_radio_receive()) {
+		irq_unlock(key);
+		control_window_fail[1]++;
+		(void)relay_radio_stop();
+		esb_raw_rx_end();
 		esb_relay_clock(false);
 		return false;
 	}
@@ -2347,11 +2414,22 @@ bool esb_relay_control_window(uint32_t start)
 	bool accepted = false;
 	bool ended = false;
 	uint32_t end = start + RELAY_RX_LEAD_TICKS + RELAY_V3_SLOT_TICKS;
+	/* After three missed Bs the next R is unknown. Listen continuously for
+	 * one maximum-length frame, with poses still fenced by the anchor.
+	 * This also acquires the cap when joining a private runtime layout. */
+	if (!relay_direct_anchor.valid || !relay_runtime_direct_granted(&relay_direct_anchor, now)) {
+		uint32_t longest = (RELAY_V3_DIRECT_SLOTS + 1U + RELAY_V3_REPAIR_MAX) * RELAY_V3_SLOT_TICKS;
+		longest = MAX(longest, (32768U + relay_geometry_current()->tps - 1U) / relay_geometry_current()->tps);
+		end = start + longest + RELAY_V3_SLOT_TICKS;
+	}
 	struct esb_network_clock clock;
 #if defined(CONFIG_RELAY_CYCLE_DIAGNOSTICS)
 	uint32_t poll_cycles = relay_cycle_now();
 #endif
-	while (esb_get_network_clock(&clock) && (int32_t)(end - clock.receiver_ticks) > 0) {
+	/* A hardware-completed B retains its captured END time if this thread
+	 * was preempted past the window deadline. Drain that latched packet;
+	 * an expired window with no END still stops listening immediately. */
+	while (esb_get_network_clock(&clock) && ((int32_t)(end - clock.receiver_ticks) > 0 || relay_radio_ended())) {
 #if defined(CONFIG_RELAY_CYCLE_DIAGNOSTICS)
 		relay_cycle_max(&control_poll_cycles_max, poll_cycles);
 		poll_cycles = relay_cycle_now();

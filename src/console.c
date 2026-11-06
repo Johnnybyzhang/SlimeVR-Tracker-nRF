@@ -1,4 +1,5 @@
 #include "frame_ledger.h"
+#include "connection/relay_protocol.h"
 #include "globals.h"
 #include "system/system.h"
 #include "system/battery_tracker.h"

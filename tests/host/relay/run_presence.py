@@ -35,7 +35,12 @@ PREFIX = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#define CONFIG_RELAY_RUNTIME_LAYOUT 1
 #include "relay_protocol.h"
+static struct relay_geometry geometry={11,5,16,120,4096,15};
+const struct relay_geometry *relay_geometry_active=&geometry;
+struct relay_timeline relay_timeline_active;
+struct relay_runtime_anchor relay_direct_anchor;
 #include "link_supervision.h"
 #include "relay_radio.h"
 #define TDMA_MAX_TRACKERS 16
@@ -80,6 +85,7 @@ static void esb_wom_reset(void){}
 static void relay_reset(void){}
 static void relay_on_control(const struct relay_control *c,uint8_t h){(void)c;(void)h;}
 static void tdma_set_enabled(bool on){tdma_enabled=on;}
+static void tdma_profile_drop(void){tdma_enabled=false;}
 static void connection_request_ping_resync(void){recovery_requests++;}
 static uint32_t layout_confirm_time;
 static bool layout_confirm_seen;
@@ -93,9 +99,13 @@ static bool esb_get_network_clock(struct esb_network_clock *c){c->receiver_ticks
 static bool esb_receiver_relay_aware(void){return true;}
 static bool tdma_layout_withdrawn(void){return false;}
 static uint8_t tdma_profile_get(void){return stream_profile;}
-struct tdma_layout {uint8_t profile,epoch,slot_index;};
-static bool tdma_layout_get(struct tdma_layout *l){*l=(struct tdma_layout){1,7,2};return tdma_enabled;}
-static void tdma_stream_anchor(uint32_t tick,uint32_t frame){(void)tick;(void)frame;}
+struct tdma_layout {uint8_t profile,epoch,slot_index,slot_ticks;};
+static bool tdma_layout_get(struct tdma_layout *l){*l=(struct tdma_layout){1,7,2,16};return tdma_enabled;}
+static void tdma_stream_control(const struct relay_control *c){
+ relay_geometry_make(&geometry,c->direct_count,c->repair_count,c->slot_ticks,c->tps_max);
+ relay_runtime_anchor_set(&relay_direct_anchor,c->frame,c->preamble_ticks,c->direct_count,c->repair_count,relay_control_next_repairs(c),relay_control_next2_repairs(c),c->slot_ticks,c->tps_max);
+ relay_timeline_announce(&relay_timeline_active,&relay_direct_anchor);
+}
 #define BIT(x) (1U<<(x))
 #define MIN(a,b) ((a)<(b)?(a):(b))
 #define MAX(a,b) ((a)>(b)?(a):(b))
@@ -162,10 +172,12 @@ int main(int argc,char **argv) {
   esb_note_trailer_locked(&tr,3000);
   assert(!ping_failures && !status_error && !connection_error_start_time && !shutdown_requested);
   assert(esb_conn_state==ESB_ST_PAIRED);
- } else if(!strcmp(argv[1],"control")) {
-  stream_profile=true;
+ } else if(!strcmp(argv[1],"control") || !strcmp(argv[1],"control-demand")) {
+  stream_profile=true;relay_geometry_make(&geometry,3,5,16,120);
   struct relay_control b={.epoch=7,.repair_count=5,.session=42,.frame=10,
-   .preamble_ticks=100000,.members=7,.expected=7,.profile=1,.maintenance_owner=255};
+   .preamble_ticks=100000,.members=7,.expected=7,.profile=1,.maintenance_owner=255,
+ .on_demand=!strcmp(argv[1],"control-demand")};
+ if(b.on_demand){relay_control_set_next_repairs(&b,0);relay_control_set_next2_repairs(&b,2);}
   for(unsigned i=0;i<5;i++) b.grants[i].owner=RELAY_OWNER_IDLE;
   f=(struct relay_rx_frame){.pipe=1,.length=72,.end_kernel_ticks=100011};
   relay_control_encode(f.data,&b);
@@ -173,17 +185,13 @@ int main(int argc,char **argv) {
   /* B sets the offset directly: preamble = END - B airtime. */
   assert(esb_relay_control_receive(&f) && control_seen && sync_filter.last_local_ticks==100000);
   assert(layout_confirm_seen && receiver_heard_seen && relayed_confirm_seen);
-  for(unsigned age=0;age<=3;age++) {
-   current_tick=100000+age*273; assert(esb_layout_granted()); assert(esb_relay_granted_at(current_tick));
-  }
-  current_tick=100000+4*273; assert(!esb_layout_granted()); assert(!esb_relay_granted_at(current_tick));
-  current_tick=100000+RELAY_V3_CACHE_FRAMES*RELAY_V3_FRAME_TICKS_MAX;
-  assert(esb_relay_granted_at(current_tick));
-  assert(!esb_relay_granted_at(current_tick+1));
-  uint32_t saved_tick=control_tick;control_tick=0xfffffff0U;
-  assert(esb_v3_lease_at(control_tick+RELAY_V3_CACHE_FRAMES*RELAY_V3_FRAME_TICKS_MAX));
-  assert(!esb_v3_lease_at(control_tick+RELAY_V3_CACHE_FRAMES*RELAY_V3_FRAME_TICKS_MAX+1));
-  control_tick=saved_tick;
+  uint32_t cutoff=relay_direct_anchor.third_start+3U*16U;
+  current_tick=cutoff-1;assert(esb_layout_granted() && esb_relay_granted_at(current_tick));
+  current_tick=cutoff;assert(!esb_layout_granted() && !esb_relay_granted_at(current_tick));
+  relay_runtime_anchor_set(&relay_direct_anchor,10,0xfffffff0U,3,5,0,2,16,120);
+  cutoff=relay_direct_anchor.third_start+3U*16U;
+  assert(esb_v3_lease_at(cutoff-1));assert(!esb_v3_lease_at(cutoff));
+
   assert(!esb_relay_control_receive(&f)); /* duplicate/stale frame */
   b.frame++; relay_control_encode(f.data,&b); f.end_kernel_ticks+=10;
   assert(!esb_relay_control_receive(&f) && sync_filter.last_local_ticks==100000); /* late delivery */
@@ -191,13 +199,15 @@ int main(int argc,char **argv) {
   assert(!esb_relay_control_receive(&f) && !tdma_enabled && !control_seen);
  } else if(!strcmp(argv[1],"profile")) {
   struct relay_pong_trailer tr={.epoch=7,.member_mask=7,.pending=true,
-   .pending_epoch=8,.pending_total=0x81,.pending_slot_ticks=16,
+   .pending_epoch=8,.pending_total=0x95,.pending_slot_ticks=16,
    .pending_member_mask=7,.activation_units=20000};
   uint8_t bytes[17];assert(relay_trailer_encode(bytes,&tr)==17 && bytes[0]==0x5c);
   struct relay_pong_trailer decoded;assert(relay_trailer_decode_len(bytes,17,&decoded));
   esb_stage_from_trailer(&decoded,100000);
-  assert(staged.total==0x81 && staged.slot==2 && staged.activation==180000);
-  bytes[10]=0x82;bytes[16]=relay_crc8(7,bytes,16);
+  assert(staged.total==relay_geometry_code(3,5) && staged.slot==2 && staged.activation==180000);
+  bytes[10]=relay_geometry_code(3,3);bytes[11]=15;bytes[16]=relay_crc8(7,bytes,16);
+  assert(relay_trailer_decode_len(bytes,17,&decoded));
+  bytes[10]=relay_geometry_code(3,6);bytes[16]=relay_crc8(7,bytes,16);
   assert(!relay_trailer_decode_len(bytes,17,&decoded));
  } else assert(false);
  printf("PASS passive PONG %s\n",argv[1]);return 0;
@@ -212,5 +222,5 @@ with tempfile.TemporaryDirectory(prefix="relay-presence-", dir="/tmp") as tmp:
         "-g", "-O1", "-fsanitize=address,undefined", "-I", str(ROOT / "src/connection"),
         str(path), "-o", str(binary)], check=True)
     for case in sys.argv[1:] or ("reboot", "rejected", "valid", "grant", "pending", "invalid-tuple",
-                                  "relay-recovery", "control", "profile"):
+                                  "relay-recovery", "control", "control-demand", "profile"):
         subprocess.run([str(binary), case], check=True)

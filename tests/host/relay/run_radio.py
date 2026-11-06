@@ -112,6 +112,16 @@ int main(int argc,char **argv) {
   assert(!irq_locked);relay_radio_stop();assert(!irq_locked);
   puts("PASS radio: raw configuration stays atomic through RXEN");
  }
+ if(argc==1 || !strcmp(argv[1],"prepare")) {
+  setup();relay_radio_stop();now_us=rxen_us=0;
+  assert(relay_radio_prepare(43,0xFE,true));
+  assert(radio.state==NRF_RADIO_STATE_DISABLED && rxen_us==0 && !irq_locked);
+  now_us=40;assert(relay_radio_receive() && rxen_us==40);
+  assert(!irq_locked);relay_radio_stop();
+  assert(relay_radio_prepare(43,0xFE,true));relay_radio_stop();
+  assert(!relay_radio_receive() && radio.state==NRF_RADIO_STATE_DISABLED);
+  puts("PASS radio: scheduled prepare stays disabled until RXEN; unstarted prepare cancels");
+ }
  if(argc==1 || !strcmp(argv[1],"dma")) {
   setup();completed();now_us=5;inject_dma=true;
   assert(relay_radio_poll(&frame));

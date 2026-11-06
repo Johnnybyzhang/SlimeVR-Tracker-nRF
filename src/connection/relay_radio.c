@@ -99,7 +99,7 @@ static bool rr_disable(void)
 /* Attribute provenance: Startup cohort 0035f0ce retained O3; no standalone attribute measurement. Keep the accepted startup group pending A/B. */
 __attribute__((optimize("O3")))
 #endif
-bool relay_radio_start(uint8_t channel, uint8_t pipe_mask, bool single)
+bool relay_radio_prepare(uint8_t channel, uint8_t pipe_mask, bool single)
 {
 	unsigned key = irq_lock();
 	if (radio_fault) { irq_unlock(key); return false; }
@@ -111,8 +111,8 @@ bool relay_radio_start(uint8_t channel, uint8_t pipe_mask, bool single)
 	/* ESB's handlers key off on_radio_disabled; none may run for our events. */
 	nrf_radio_int_disable(NRF_RADIO, UINT32_MAX);
 	NVIC_ClearPendingIRQ(RR_IRQ);
-	/* Keep unrelated IRQ work from delaying RXEN after the acquisition
-	 * deadline check. The caller already owns an idle radio. */
+	/* The caller owns an idle radio. Prepare may precede the RX edge,
+	 * with interrupts restored while it waits; RADIO remains disabled. */
 	nrf_radio_shorts_set(NRF_RADIO, 0);
 	if (!rr_disable()) {
 		irq_unlock(key);
@@ -127,11 +127,35 @@ bool relay_radio_start(uint8_t channel, uint8_t pipe_mask, bool single)
 	 * RXIDLE -> START has no additional 40 us radio ramp-up. */
 	nrf_radio_shorts_set(NRF_RADIO, RR_RSSI_SHORTS | NRF_RADIO_SHORT_READY_START_MASK
 		| (single ? RR_SHORT_END_DISABLE : 0U));
+
+	irq_unlock(key);
+	return true;
+}
+
+/* No configuration work belongs between the caller's RX edge and RXEN. */
+bool relay_radio_receive(void)
+{
+	unsigned key = irq_lock();
+	if (radio_fault || !saved.active) {
+		irq_unlock(key);
+		return false;
+	}
 	last_poll_ticks = sys_clock_tick_get_32();
 	__DMB();
 	nrf_radio_task_trigger(NRF_RADIO, NRF_RADIO_TASK_RXEN);
 	irq_unlock(key);
 	return true;
+}
+
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("O3")))
+#endif
+bool relay_radio_start(uint8_t channel, uint8_t pipe_mask, bool single)
+{
+	unsigned key = irq_lock();
+	bool ok = relay_radio_prepare(channel, pipe_mask, single) && relay_radio_receive();
+	irq_unlock(key);
+	return ok;
 }
 
 static bool rr_copy(struct relay_rx_frame *frame)

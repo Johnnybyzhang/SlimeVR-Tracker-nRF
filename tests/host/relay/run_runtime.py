@@ -182,6 +182,59 @@ static void late_own_tx(void) {
 }
 
 
+static unsigned cache_seed=0x12345678;
+static unsigned cache_random(void) {cache_seed^=cache_seed<<13;cache_seed^=cache_seed>>17;cache_seed^=cache_seed<<5;return cache_seed;}
+static void cache_equivalence(void) {
+ for(unsigned trial=0;trial<10000;trial++) {
+  reset();test_layout.profile=1;
+  control_helper=0;
+  control_plan=(struct relay_control){.frame=100,.repair_count=1+trial%5,.members=0xffff};
+  unsigned grant=cache_random()%control_plan.repair_count;
+  control_plan.grants[grant]=(struct relay_grant){0,(uint16_t)cache_random()};
+  for(unsigned age=0;age<3;age++) relay_control_missing(&control_plan, age)=cache_random();
+  for(unsigned i=0;i<RELAY_CACHE_RECORDS;i++) {
+   struct relay_record *r=&records[i];
+   r->valid=cache_random()%3; r->child=1+cache_random()%15;
+   r->capture_frame=100-cache_random()%5; r->length=17; r->rssi=20+cache_random()%50;
+   memset(r->data,0,sizeof(r->data));r->data[0]=1;r->data[1]=r->child;r->data[16]=i;
+  }
+  uint64_t selected=((uint64_t)cache_random()<<32)|cache_random();
+  repair_selected=selected;
+  uint8_t expected[72]={0},actual[72]={0};
+  size_t n=reference_build_repair(expected,RELAY_V3_REPAIR_FIRST_SLOT+grant);
+  uint64_t expected_selected=repair_selected,expected_pending=repair_pending_mask;
+  uint8_t pending[RELAY_MAX_TRACKERS];memcpy(pending,repair_pending,sizeof(pending));
+  repair_selected=selected;
+  size_t m=relay_build_repair(actual,RELAY_V3_REPAIR_FIRST_SLOT+grant);
+  assert(n==m && !memcmp(expected,actual,n));
+  assert(expected_selected==repair_selected && expected_pending==repair_pending_mask && !memcmp(pending,repair_pending,sizeof(pending)));
+ }
+ puts("PASS runtime: 10000 independent cache-builder wire and selection comparisons, all five nonempty pool sizes");
+}
+
+static void final_cache_gap(void) {
+ for(unsigned repairs=1;repairs<=5;repairs++) {
+  reset();test_layout.profile=RELAY_PROFILE_120HZ;
+  struct relay_control c={.session=42,.epoch=7,.frame=0,.preamble_ticks=500+RELAY_V3_B_PREAMBLE,.members=7,.repair_count=repairs};
+  relay_on_control(&c,0);
+  uint32_t start=relay_frame_start(500,3)+RELAY_V3_SLOT_TICKS;
+  now_ticks=start;incoming.data[16]=3;
+  test_store(1,&incoming,7,start+RELAY_V3_FRAME_TICKS_MAX);
+  c.frame=3;c.missing[0]=c.missing[2]=2;
+  for(unsigned i=0;i<repairs;i++)c.grants[i]=(struct relay_grant){0,2};
+  relay_on_control(&c,0);
+  uint8_t bytes[72];struct relay_repair parsed;
+  if(repairs>1)assert(!relay_build_repair(bytes,RELAY_V3_REPAIR_FIRST_SLOT+repairs-2));
+  size_t n=relay_build_repair(bytes,RELAY_V3_REPAIR_FIRST_SLOT+repairs-1);
+  if(repairs<=3)assert(relay_repair_decode(bytes,n,&parsed) && parsed.count==1 && parsed.records[0].capture_frame==3);
+  else assert(!n);
+  relay_repair_result(-EAGAIN);
+  c.missing[1]=2;relay_on_control(&c,0);
+  assert(!relay_build_repair(bytes,RELAY_V3_REPAIR_FIRST_SLOT+repairs-1));
+ }
+ puts("PASS runtime: actual final narrow slot permits an age-two gap for R1/R2/R3; earlier, age-one and R4/R5 guards stay fixed");
+}
+
 static void fast_cache(void) {
  reset(); test_layout.profile=RELAY_PROFILE_120HZ;
  test_layout.total_slots=RELAY_V3_TOTAL_SLOTS;test_layout.slot_ticks=RELAY_V3_SLOT_TICKS;
@@ -374,11 +427,68 @@ static void maintenance(void) {
  assert(!relay_next_maintenance(&target) && relay_maintenance_late==late+1);
  relay_reset();
 }
+
+static void control_accounting(void) {
+ reset();test_layout.profile=1;
+ unsigned before=repair_diag[1].grants;
+ struct relay_control c={.frame=100,.session=42,.epoch=7,.repair_count=1};
+ c.grants[0]=(struct relay_grant){.owner=0,.children=2};c.missing[0]=2;
+ relay_on_control(&c,0);
+ assert(repair_diag[1].grants==before);
+ records[0]=(struct relay_record){.valid=true,.child=1,.epoch=7,.capture_frame=100,.length=17,.rssi=50};
+ records[0].data[0]=1;records[0].data[1]=1;
+ uint8_t buf[72];size_t n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT);
+ struct relay_repair decoded;
+ assert(n && relay_repair_decode(buf,n,&decoded) && decoded.count==1);
+ assert(decoded.records[0].capture_frame==100 && decoded.records[0].source.frame[1]==1);
+ assert(repair_diag[1].grants==before);
+ relay_control_serviced();assert(repair_diag[1].grants==before+1 && relay_control_done);
+ relay_control_serviced();assert(repair_diag[1].grants==before+1);
+ c.frame++;relay_on_control(&c,0);c.frame++;relay_on_control(&c,0);
+ assert(repair_diag[1].grants==before+2);
+ relay_control_serviced();assert(repair_diag[1].grants==before+3);
+ c.frame++;relay_on_control(&c,0);relay_reset();relay_control_serviced();
+ assert(repair_diag[1].grants==before+4);
+ puts("PASS runtime: B accounting follows repair construction, runs once, and flushes on reset");
+}
+static void demand_cache(void) {
+ reset();test_layout.profile=RELAY_PROFILE_120HZ;
+ struct relay_control full={.session=42,.epoch=7,.frame=100,.members=0xffff,.on_demand=true};relay_on_control(&full,0);
+ for(unsigned age=0;age<5;age++)for(unsigned ch=1;ch<16;ch++) {
+ incoming.data[1]=ch;relay_store(ch,&incoming,7,0,&test_layout,100-age,relay_generation);
+ }
+ unsigned count=0;for(unsigned i=0;i<80;i++)count+=records[i].valid;assert(count==75);
+
+ reset();test_layout.profile=RELAY_PROFILE_120HZ;
+ struct relay_control c={.session=42,.epoch=7,.frame=100,.members=7,.repair_count=3,.on_demand=true};
+ c.grants[0]=c.grants[1]=c.grants[2]=(struct relay_grant){.owner=0,.children=2};
+ for(unsigned age=0;age<5;age++)relay_control_missing(&c, age)=2;
+ relay_on_control(&c,0);
+ for(unsigned age=0;age<5;age++) {
+ struct relay_record *r=&records[64+age];*r=(struct relay_record){.valid=true,.child=1,.epoch=7,.capture_frame=100-age,.length=17};r->data[0]=1;r->data[1]=1;
+ }
+ uint8_t buf[72];struct relay_repair r;
+ size_t n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT);
+ assert(n && relay_repair_decode(buf,n,&r) && r.count==3 && r.records[0].capture_frame==96 && r.records[2].capture_frame==98);
+ relay_repair_result(-EAGAIN);
+ n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT+1);assert(n && relay_repair_decode(buf,n,&r) && r.records[0].capture_frame==96);
+ relay_repair_result(0);
+ c.missing[2]=relay_control_missing(&c, 3)=relay_control_missing(&c, 4)=0;relay_on_control(&c,0);
+ n=relay_build_repair(buf,RELAY_V3_REPAIR_FIRST_SLOT);assert(n && relay_repair_decode(buf,n,&r) && r.count==2 && r.records[0].capture_frame==99);
+ relay_repair_result(0);
+ records[68].valid=records[67].valid=true;relay_control_missing(&c, 4)=2;
+ c.frame=101;relay_on_control(&c,0);assert(!records[68].valid && records[67].valid);
+ c.on_demand=false;relay_on_control(&c,0);assert(!records[67].valid && !records[66].valid);
+ puts("PASS runtime: five-age high-index cache, failed-submit retry, age-five expiry and static three-age fence");
+}
 int main(int argc,char **argv) {
+    demand_cache();
+    cache_equivalence();
+    if(argc==1 || !strcmp(argv[1],"accounting")) control_accounting();
     if(argc==1 || !strcmp(argv[1],"d10")) d10_b_ownership();
     if(argc==1 || !strcmp(argv[1],"learned")) {failed_store(); learned_reports();}
     if(argc==1 || !strcmp(argv[1],"maintenance")) maintenance();
-    if(argc==1 || !strcmp(argv[1],"fast")) fast_cache();
+    if(argc==1 || !strcmp(argv[1],"fast")) {fast_cache(); final_cache_gap();}
     if(argc==1 || !strcmp(argv[1],"adjacent")) adjacent_child();
     if(argc==1 || !strcmp(argv[1],"overflow")) no_fit_request();
     if(argc==1 || !strcmp(argv[1],"lease")) lease_and_capture();
@@ -390,6 +500,7 @@ int main(int argc,char **argv) {
 '''
 
 caps = "relay_info_caps()" if "uint8_t relay_info_caps(" in source else "RELAY_INFO_CAPS"
+source += (HERE / "repair_reference.inc").read_text()
 source += f"\nstatic uint8_t host_info_caps(void) {{ return {caps}; }}\n"
 with tempfile.TemporaryDirectory(prefix="relay-runtime-", dir="/tmp") as tmp:
     path = Path(tmp) / "runtime.c"

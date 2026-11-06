@@ -57,7 +57,7 @@ static struct {
 } assignment;
 
 #define RELAY_CACHE_RECORDS (RELAY_MAX_TRACKERS * RELAY_V3_CACHE_FRAMES)
-static struct relay_record records[RELAY_CACHE_RECORDS];
+static struct relay_record records[RELAY_MAX_TRACKERS * RELAY_CACHE_MAX_FRAMES];
 static struct relay_control control_plan;
 static struct {
 	uint8_t expected, heard;
@@ -69,12 +69,14 @@ static struct {
 static uint8_t repair_pending[RELAY_MAX_TRACKERS];
 static struct relay_peer_report pending_report;
 static bool control_valid;
+static bool control_account_pending;
 static uint32_t relay_generation;
 static bool maintenance_attempted;
 uint32_t relay_maintenance_granted, relay_maintenance_late, relay_maintenance_lag_max;
 static uint8_t control_helper;
 static uint32_t repair_attempted;
 static uint64_t repair_selected, repair_pending_mask;
+static uint64_t repair_selected_high, repair_pending_high;
 
 static bool overflow_pending;
 static int64_t forward_needed_until_ms;
@@ -112,8 +114,12 @@ static bool children_seen;
 static K_SEM_DEFINE(relay_wake_sem, 0, 1);
 static K_SEM_DEFINE(relay_control_done, 0, 1);
 
+static void relay_control_account(void);
+
 void relay_control_serviced(void)
 {
+	/* The connection owner has finished the unchanged repair deadlines. */
+	relay_control_account();
 	k_sem_give(&relay_control_done);
 }
 
@@ -137,15 +143,21 @@ void relay_on_own_trailer(const struct relay_pong_trailer *trailer)
 /* Caller holds IRQ lock. Invalid records never expose their old payload. */
 static void relay_cache_invalidate(void)
 {
-	for (unsigned i = 0; i < RELAY_CACHE_RECORDS; i++) records[i].valid = false;
+	for (unsigned i = 0; i < RELAY_MAX_TRACKERS * RELAY_CACHE_MAX_FRAMES; i++) {
+		records[i].valid = false;
+	}
 }
 
 void relay_reset(void)
 {
+	if (control_account_pending) {
+		relay_control_account();
+	}
 	unsigned key = irq_lock();
 	relay_generation++;
 	assignment.valid = false;
 	control_valid = false;
+	control_account_pending = false;
 	relay_cache_invalidate();
 	pending_report.count = 0;
 	memset(peer_counts, 0, sizeof(peer_counts));
@@ -259,7 +271,9 @@ static void relay_store(uint8_t child, const struct relay_rx_frame *frame, uint8
 	}
 	const struct tdma_layout layout = *snapshot;
 	struct relay_record *slot = NULL;
-	for (unsigned i = 0; i < (layout.profile ? RELAY_CACHE_RECORDS : RELAY_MAX_CHILDREN); i++) {
+	for (unsigned i = 0;
+		 i < (layout.profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
+		 i++) {
 		if (records[i].valid && records[i].child == child &&
 		    (!layout.profile || records[i].capture_frame == captured)) {
 			slot = &records[i];
@@ -267,8 +281,10 @@ static void relay_store(uint8_t child, const struct relay_rx_frame *frame, uint8
 			break;
 		}
 	}
-	for (unsigned i = 0; slot == NULL && i < (layout.profile ? RELAY_CACHE_RECORDS : RELAY_MAX_CHILDREN);
-	     i++) {
+	for (unsigned i = 0;
+		 slot == NULL
+		 && i < (layout.profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
+		 i++) {
 		if (!records[i].valid) {
 			slot = &records[i];
 		}
@@ -294,15 +310,16 @@ static void relay_expire_locked(uint32_t now, const struct tdma_layout *layout)
 {
 	uint16_t frame = layout->profile ? (uint16_t)relay_frame_at_tick(
 		relay_control_origin(control_plan.preamble_ticks, control_plan.frame), now) : 0;
-	for (unsigned i = 0; i < (layout->profile ? RELAY_CACHE_RECORDS : RELAY_MAX_CHILDREN); i++) {
+	for (unsigned i = 0;
+		 i < (layout->profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
+		 i++) {
 		if (!records[i].valid) {
 			continue;
 		}
 		int32_t remaining = (int32_t)(records[i].expiry - now);
-		if (records[i].epoch != layout->epoch ||
-		    (!layout->profile && remaining <= (int32_t)RELAY_FORWARD_GUARD_TICKS) ||
-		    (layout->profile &&
-		     !relay_capture_age(frame, records[i].capture_frame))) {
+		if (records[i].epoch != layout->epoch || (!layout->profile && remaining <= (int32_t)RELAY_FORWARD_GUARD_TICKS)
+			|| (layout->profile
+				&& (uint16_t)(frame - records[i].capture_frame) >= relay_control_cache_frames(&control_plan))) {
 			records[i].valid = false;
 			stats.expired++;
 		}
@@ -329,7 +346,9 @@ bool relay_records_pending(void)
 	}
 	unsigned key = irq_lock();
 	relay_expire_locked(now, &layout);
-	for (unsigned i = 0; i < (layout.profile ? RELAY_CACHE_RECORDS : RELAY_MAX_CHILDREN); i++) {
+	for (unsigned i = 0;
+		 i < (layout.profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
+		 i++) {
 		pending |= records[i].valid;
 	}
 	irq_unlock(key);
@@ -363,7 +382,9 @@ size_t relay_build_bundle(uint8_t *buf, size_t own_len, size_t capacity, uint8_t
 	relay_expire_locked(now, &layout);
 	if (relay_bundle_begin(&builder, out, capacity, head_id, own, (uint8_t)own_len, overflow_pending)) {
 		bool dropped = false;
-		for (unsigned i = 0; i < (layout.profile ? RELAY_CACHE_RECORDS : RELAY_MAX_CHILDREN); i++) {
+		for (unsigned i = 0;
+			 i < (layout.profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
+			 i++) {
 			if (!records[i].valid) {
 				continue;
 			}
@@ -387,7 +408,9 @@ size_t relay_build_bundle(uint8_t *buf, size_t own_len, size_t capacity, uint8_t
 			overflow_pending = dropped;
 		}
 	} else {
-		for (unsigned i = 0; i < (layout.profile ? RELAY_CACHE_RECORDS : RELAY_MAX_CHILDREN); i++) {
+		for (unsigned i = 0;
+			 i < (layout.profile ? RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan) : RELAY_MAX_CHILDREN);
+			 i++) {
 			if (records[i].valid) {
 				overflow_pending = true;
 				forward_needed_until_ms = k_uptime_get() + 2000;
@@ -857,6 +880,25 @@ size_t relay_diag_build(uint8_t *buf, size_t capacity, uint8_t tracker_id)
 
 void relay_print_status(void)
 {
+	unsigned key = irq_lock();
+	uint32_t frame = control_plan.frame;
+	uint8_t direct = control_plan.direct_count, repairs = control_plan.repair_count;
+	uint8_t next_repairs = relay_control_next_repairs(&control_plan), width = control_plan.slot_ticks;
+	uint8_t next2_repairs = relay_control_next2_repairs(&control_plan);
+	uint16_t cap = control_plan.tps_max;
+	bool valid = control_valid;
+	irq_unlock(key);
+	printk(
+		"relay B received: valid=%u frame=%u direct=%u R=%u next_R=%u next2_R=%u slot_ticks=%u tps_max=%u\n",
+		valid,
+		frame,
+		direct,
+		repairs,
+		next_repairs,
+		next2_repairs,
+		width,
+		cap
+	);
 	struct relay_pong_trailer trailer;
 	struct tdma_layout layout;
 	bool head = relay_assignment_get(&trailer, &layout, NULL);
@@ -884,12 +926,67 @@ void relay_print_status(void)
 	esb_print_link_status();
 }
 
+/* Counters and ledger rows do not participate in grant or cache decisions.
+ * Keep them out of the B-to-R0 path. Only the connection owner publishes B
+ * and services it; the snapshot also keeps reset/console readers harmless. */
+static void relay_control_account(void)
+{
+	unsigned key = irq_lock();
+	if (!control_account_pending) {
+		irq_unlock(key);
+		return;
+	}
+	struct relay_control snapshot = control_plan;
+	uint8_t helper = control_helper;
+	control_account_pending = false;
+	irq_unlock(key);
+	const struct relay_control *control = &snapshot;
+#ifdef CONFIG_RELAY_FRAME_LEDGER
+	for (unsigned child = 0; child < RELAY_MAX_TRACKERS; child++) {
+		if (!ledger_child_enabled(child)) {
+			continue;
+		}
+		uint8_t grants = 0;
+		for (unsigned slot = 0; slot < control->repair_count; slot++) {
+			if (control->grants[slot].owner == helper && (control->grants[slot].children & (1U << child))) {
+				grants |= 1U << slot;
+			}
+		}
+		for (unsigned age = 0; age < relay_control_cache_frames(control); age++) {
+			ledger_note(
+				control->session,
+				control->frame - age,
+				child,
+				LEDGER_HELPER_B,
+				(grants << 1) | !!(relay_control_missing(control, age) & (1U << child)),
+				helper,
+				age
+			);
+		}
+	}
+#endif
+	for (unsigned slot = 0; slot < control->repair_count; slot++) {
+		if (control->grants[slot].owner != helper) {
+			continue;
+		}
+		for (unsigned child = 0; child < RELAY_MAX_TRACKERS; child++) {
+			if (control->grants[slot].children & (1U << child)) {
+				repair_diag[child].grants++;
+			}
+		}
+	}
+}
+
 #if defined(__GNUC__) && !defined(__clang__)
 /* Attribute provenance: Capture handoff (0084d3a6) and repair-speed (dc676076) cohorts retained O3 as a group. No isolated attribute-only saving; retain pending A/B. */
 __attribute__((optimize("O3")))
 #endif
 void relay_on_control(const struct relay_control *control, uint8_t helper)
 {
+	/* Preserve accounting if a caller publishes another B without service. */
+	if (control_account_pending) {
+		relay_control_account();
+	}
 	unsigned key = irq_lock();
 	if (!control_valid || control_plan.session != control->session ||
 	    control_plan.epoch != control->epoch) {
@@ -902,36 +999,25 @@ void relay_on_control(const struct relay_control *control, uint8_t helper)
 	control_plan = *control;
 	control_helper = helper;
 	control_valid = true;
-#ifdef CONFIG_RELAY_FRAME_LEDGER
-	for (unsigned child = 0; child < 11; child++) {
-		if (!ledger_child_enabled(child)) continue;
-		uint8_t grants = 0;
-		for (unsigned slot = 0; slot < control->repair_count; slot++)
-			if (control->grants[slot].owner == helper &&
-			    (control->grants[slot].children & (1U << child))) grants |= 1U << slot;
-		for (unsigned age = 0; age < RELAY_V3_CACHE_FRAMES; age++)
-			ledger_note(control->session, control->frame - age, child, LEDGER_HELPER_B,
-				(grants << 1) | !!(control->missing[age] & (1U << child)), helper, age);
-	}
-#endif
+	control_account_pending = true;
+
 	maintenance_attempted = false;
 	if ((control->flags & RELAY_CONTROL_MAINTENANCE) && control->maintenance_owner == helper) {
 		relay_maintenance_granted++;
 	}
 	repair_attempted = 0;
-	repair_selected = 0;
-	repair_pending_mask = 0;
-	for (unsigned slot = 0; slot < control->repair_count; slot++) {
-		if (control->grants[slot].owner != helper) continue;
-		for (unsigned child = 0; child < RELAY_MAX_TRACKERS; child++) {
-			if (control->grants[slot].children & (1U << child)) repair_diag[child].grants++;
-		}
-	}
-	for (unsigned i = 0; i < RELAY_CACHE_RECORDS; i++) {
+	repair_selected = repair_selected_high = 0;
+	repair_pending_mask = repair_pending_high = 0;
+
+	for (unsigned i = 0; i < RELAY_MAX_TRACKERS * RELAY_CACHE_MAX_FRAMES; i++) {
 		struct relay_record *r = &records[i];
 		uint16_t age = (uint16_t)(control->frame - r->capture_frame);
-		if (r->valid && (age >= RELAY_V3_CACHE_FRAMES || !(control->missing[age] & (1U << r->child)))) {
-			if (age >= RELAY_V3_CACHE_FRAMES) ledger_note(control_plan.session, control->frame - age, r->child, LEDGER_EXPIRE, 0, helper, age);
+		if (r->valid
+			&& (age >= relay_control_cache_frames(control)
+				|| !(relay_control_missing(control, age) & (1U << r->child)))) {
+			if (age >= relay_control_cache_frames(control)) {
+				ledger_note(control_plan.session, control->frame - age, r->child, LEDGER_EXPIRE, 0, helper, age);
+			}
 			r->valid = false;
 		}
 	}
@@ -995,6 +1081,12 @@ bool relay_next_repair(uint32_t *target, uint8_t *slot)
 	return false;
 }
 
+/* Preserve the narrow pool's last-chance rule as its physical R changes. */
+static inline bool relay_final_narrow_grant(unsigned grant)
+{
+	return control_plan.repair_count <= 3U && grant + 1U == control_plan.repair_count;
+}
+
 #ifdef CONFIG_RELAY_FRAME_LEDGER
 static struct { uint32_t frame; uint8_t child, age; } ledger_pending[RELAY_MAX_CHILDREN];
 static unsigned ledger_pending_count;
@@ -1009,7 +1101,7 @@ size_t relay_build_repair(uint8_t *buf, uint8_t slot)
 	    .helper = control_helper, .epoch = control_plan.epoch, .session = control_plan.session};
 	unsigned key = irq_lock();
 	unsigned grant = slot - RELAY_V3_REPAIR_FIRST_SLOT;
-	repair_pending_mask = 0;
+	repair_pending_mask = repair_pending_high = 0;
 	pending_report.count = 0;
 	#ifdef CONFIG_RELAY_FRAME_LEDGER
 	ledger_pending_count = 0;
@@ -1043,15 +1135,44 @@ size_t relay_build_repair(uint8_t *buf, uint8_t slot)
 	/* A newer pose must not obsolete an older repair held by another helper.
 	 * Fill consecutive missing ages in one packet; a gap waits for the next
 	 * B confirmation or the existing cache expiry, never a longer deadline. */
+	/* Classify once instead of scanning all 48 records independently for
+	 * each cache age. Ascending record indices preserve packet ordering. */
+	uint64_t by_age[RELAY_CACHE_MAX_FRAMES] = {0}, high[RELAY_CACHE_MAX_FRAMES] = {0};
+	uint16_t children = control_plan.grants[grant].children;
+	for (unsigned i = 0; i < RELAY_MAX_TRACKERS * relay_control_cache_frames(&control_plan); i++) {
+		const struct relay_record *r = &records[i];
+		/* A narrow grant usually names one child. Reject unrelated records
+		 * before computing their age or a 64-bit selection mask. */
+		if (!r->valid || !(children & (1U << r->child))) {
+			continue;
+		}
+		uint16_t age = (uint16_t)(control_plan.frame - r->capture_frame);
+		if (age < relay_control_cache_frames(&control_plan)
+			&& !((i < 64 ? repair_selected : repair_selected_high) & (1ULL << (i % 64U)))) {
+			if (i < 64) {
+				by_age[age] |= 1ULL << i;
+			} else {
+				high[age] |= 1ULL << (i - 64U);
+			}
+		}
+	}
 	uint16_t blocked = 0;
-	for (int age = RELAY_V3_CACHE_FRAMES - 1; age >= 0; age--) {
+	for (int age = relay_control_cache_frames(&control_plan) - 1; age >= 0; age--) {
 		uint16_t included = 0;
-		for (unsigned i = 0; i < RELAY_CACHE_RECORDS && repair.count < RELAY_MAX_CHILDREN; i++) {
+		uint64_t candidates = by_age[age];
+		while ((candidates || high[age]) && repair.count < RELAY_MAX_CHILDREN) {
+			unsigned i;
+			if (candidates) {
+				i = __builtin_ctzll(candidates);
+				candidates &= candidates - 1U;
+			} else {
+				i = 64U + __builtin_ctzll(high[age]);
+				high[age] &= high[age] - 1U;
+			}
 			struct relay_record *r = &records[i];
-			if (!r->valid || (repair_selected & (1ULL << i)) || (blocked & (1U << r->child)) ||
-			    (uint16_t)(control_plan.frame - r->capture_frame) != age ||
-			    !(control_plan.grants[grant].children & (1U << r->child)) ||
-			    length + RELAY_REPAIR_RECORD_META_LEN + r->length > RELAY_FRAME_MAX) {
+			/* Classification and selection share this IRQ lock. Only gap
+			 * blocking and remaining packet space can reject a candidate. */
+			if ((blocked & (1U << r->child)) || length + RELAY_REPAIR_RECORD_META_LEN + r->length > RELAY_FRAME_MAX) {
 				continue;
 			}
 			repair.records[repair.count++] = (struct relay_repair_record){
@@ -1059,8 +1180,16 @@ size_t relay_build_repair(uint8_t *buf, uint8_t slot)
 			    .source = {.frame = r->data, .length = r->length, .rssi = r->rssi}};
 			length += RELAY_REPAIR_RECORD_META_LEN + r->length;
 			included |= 1U << r->child;
-			repair_selected |= 1ULL << i;
-			repair_pending_mask |= 1ULL << i;
+			if (i < 64) {
+				repair_selected |= 1ULL << i;
+			} else {
+				repair_selected_high |= 1ULL << (i - 64U);
+			}
+			if (i < 64) {
+				repair_pending_mask |= 1ULL << i;
+			} else {
+				repair_pending_high |= 1ULL << (i - 64U);
+			}
 			repair_diag[r->child].selected++;
 			ledger_note(control_plan.session, control_plan.frame - age, r->child, LEDGER_SELECTED, -(int16_t)r->rssi, control_helper, age);
 			repair_pending[r->child]++;
@@ -1070,7 +1199,15 @@ size_t relay_build_repair(uint8_t *buf, uint8_t slot)
             ledger_pending[ledger_pending_count++].age = age;
 #endif
 		}
-		blocked |= control_plan.missing[age] & ~included;
+		/* An uncaptured age-two record cannot arrive after the final
+		 * narrow-pool grant within the cache deadline. It must not suppress
+		 * a younger copy held by that owner. Earlier grants and age-one
+		 * gaps retain chronological blocking, including an R1 frame. */
+		bool final_expiring_gap
+			= age == (int)relay_control_cache_frames(&control_plan) - 1 && relay_final_narrow_grant(grant);
+		if (!final_expiring_gap) {
+			blocked |= relay_control_missing(&control_plan, age) & ~included;
+		}
 	}
 	size_t n = repair.count ? relay_repair_encode(buf, &repair) : 0;
 	irq_unlock(key);
@@ -1115,8 +1252,11 @@ void relay_repair_result(int result)
 	pending_report.count = 0;
 	/* A refused packet was never queued. Retain its records for another
 	 * granted slot; the failed slot itself remains consumed. */
-	if (result != 0) repair_selected &= ~repair_pending_mask;
-	repair_pending_mask = 0;
+	if (result != 0) {
+		repair_selected &= ~repair_pending_mask;
+		repair_selected_high &= ~repair_pending_high;
+	}
+	repair_pending_mask = repair_pending_high = 0;
 	for (unsigned child = 0; child < RELAY_MAX_TRACKERS; child++) {
 		if (result == 0) {
 			repair_diag[child].queued += repair_pending[child];
