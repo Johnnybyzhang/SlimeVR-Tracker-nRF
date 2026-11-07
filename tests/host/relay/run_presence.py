@@ -91,6 +91,7 @@ static uint32_t layout_confirm_time;
 static bool layout_confirm_seen;
 static bool control_seen, stream_profile;
 static unsigned control_received;
+static uint32_t control_first_received, control_repeat_received, control_repeat_seen, control_repeat_reject[6];
 static uint32_t control_reject[6];
 static int32_t control_err_min, control_err_max, control_err_last;
 static uint32_t control_session, control_frame, control_tick, current_tick;

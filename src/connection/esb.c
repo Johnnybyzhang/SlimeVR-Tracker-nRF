@@ -160,6 +160,8 @@ static bool layout_confirm_seen;
 static bool control_seen;
 static uint32_t control_session, control_frame, control_tick;
 static uint32_t control_received, control_missed;
+static uint32_t control_first_received, control_repeat_received, control_repeat_seen;
+static uint32_t control_repeat_reject[6];
 static uint32_t control_open_hist[16][2];
 /* B rejects by reason: decode, layout/profile, epoch, slot, session/order, sync. */
 static uint32_t control_reject[6];
@@ -1645,6 +1647,21 @@ void esb_print_link_status(void)
 #endif
 	printk("link: profile=%u B_received=%u B_missed=%u session=%u frame=%u\n",
 		tdma_profile_get(), control_received, control_missed, control_session, control_frame);
+	printk(
+		"link: B_copies first=%u second=%u repeat_seen=%u\n",
+		control_first_received,
+		control_repeat_received,
+		control_repeat_seen
+	);
+	printk(
+		"link: B2_reject decode=%u layout=%u epoch=%u slot=%u order=%u sync=%u\n",
+		control_repeat_reject[0],
+		control_repeat_reject[1],
+		control_repeat_reject[2],
+		control_repeat_reject[3],
+		control_repeat_reject[4],
+		control_repeat_reject[5]
+	);
 	printk("link: B_reject decode=%u layout=%u epoch=%u slot=%u order=%u sync=%u\n",
 		control_reject[0], control_reject[1], control_reject[2], control_reject[3],
 		control_reject[4], control_reject[5]);
@@ -2236,24 +2253,30 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 #endif
 	struct relay_control control;
 	struct tdma_layout layout;
+	bool repeat = frame->length && frame->data[0] == 0xecU;
+	control_repeat_seen += repeat;
 	if (frame->pipe != 1 || !relay_control_decode(frame->data, frame->length, &control)) {
 		if (frame->pipe == 1 && frame->length == RELAY_CONTROL_LEN && frame->data[0] == RELAY_CONTROL_V3) {
 			tdma_profile_drop();
 		}
 		control_reject[0]++;
+		control_repeat_reject[0] += repeat;
 		return false;
 	}
 	if (!tdma_layout_get(&layout) || layout.profile != RELAY_PROFILE_120HZ) {
 		control_reject[1]++;
+		control_repeat_reject[1] += repeat;
 		return false;
 	}
 	if (control.epoch != layout.epoch || control.direct_count != RELAY_V3_DIRECT_SLOTS
 		|| control.slot_ticks != layout.slot_ticks) {
 		control_reject[2]++;
+		control_repeat_reject[2] += repeat;
 		return false;
 	}
 	if (relay_member_slot(control.members, tracker_id) != layout.slot_index) {
 		control_reject[3]++;
+		control_repeat_reject[3] += repeat;
 		return false;
 	}
 	unsigned key = irq_lock();
@@ -2265,6 +2288,7 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 			layout_confirm_seen = false;
 		}
 		control_reject[4]++;
+		control_repeat_reject[4] += repeat;
 		irq_unlock(key);
 		return false;
 	}
@@ -2285,6 +2309,7 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	control_err_max = MAX(control_err_max, control_err_last);
 	if (!sync_filter.initialized || !link_passive_sample_acceptable(net_tick_difference(offset, predicted))) {
 		control_reject[5]++;
+		control_repeat_reject[5] += repeat;
 		irq_unlock(key);
 		return false;
 	}
@@ -2302,6 +2327,8 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	relay_on_control(&control, tracker_id);
 	control_seen = true;
 	control_received++;
+	control_repeat_received += repeat;
+	control_first_received += !repeat;
 	layout_confirm_time = k_uptime_get_32();
 	layout_confirm_seen = true;
 	receiver_heard_time = layout_confirm_time;
