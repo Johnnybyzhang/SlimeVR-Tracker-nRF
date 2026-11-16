@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <string.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/led.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/kernel.h>
 #include <zephyr/pm/device.h>
@@ -38,6 +39,10 @@ BUILD_ASSERT(
  * property presence, decides whether those PWM channels belong to this owner. */
 #define HW_PWM (!HW_PIXEL && HW_KIND != HW_KIND_no_led && DT_NODE_HAS_PROP(USER_NODE, pwms))
 #define HW_GPIO (!HW_PIXEL && HW_KIND != HW_KIND_no_led && DT_NODE_HAS_PROP(USER_NODE, led_channel_gpios))
+/* Binary output through a Zephyr LED driver (for example a PMIC LED sink on
+ * I2C). Only the LED worker calls it, so blocking bus writes are permitted. */
+#define HW_LEDDEV (!HW_PIXEL && HW_KIND != HW_KIND_no_led && DT_NODE_HAS_PROP(USER_NODE, led_device))
+#define HW_BINARY (HW_GPIO || HW_LEDDEV)
 #define HW_GATE DT_NODE_HAS_PROP(USER_NODE, led_en_gpios)
 #define HW_MIX (HW_KIND == HW_KIND_rg_mix || HW_KIND == HW_KIND_rgb_pwm || HW_PIXEL)
 #define HW_RGB (HW_KIND == HW_KIND_rgb_pwm || HW_PIXEL)
@@ -62,9 +67,9 @@ BUILD_ASSERT(HW_PRIMARY < HW_CHANNELS, "LED primary channel is outside descripto
 BUILD_ASSERT(HW_BOARD_LIMIT > 0 && HW_BOARD_LIMIT <= 10000, "Invalid LED board limit");
 BUILD_ASSERT(HW_TOTAL_LIMIT > 0 && HW_TOTAL_LIMIT <= 10000, "Invalid LED aggregate duty limit");
 BUILD_ASSERT(sizeof(channel_weights) / sizeof(channel_weights[0]) == HW_CHANNELS, "Missing channel weights");
-BUILD_ASSERT(HW_PIXEL || (HW_PWM != HW_GPIO), "Declare one explicit LED output transport");
+BUILD_ASSERT(HW_PIXEL || (HW_PWM + HW_GPIO + HW_LEDDEV) == 1, "Declare one explicit LED output transport");
 BUILD_ASSERT(
-	(HW_KIND != HW_KIND_mono_gpio || (HW_GPIO && HW_CHANNELS == 1))
+	(HW_KIND != HW_KIND_mono_gpio || (HW_BINARY && HW_CHANNELS == 1))
 		&& (HW_KIND != HW_KIND_mono_pwm || (HW_PWM && HW_CHANNELS == 1)),
 	"Mono capability transport mismatch"
 );
@@ -76,7 +81,7 @@ BUILD_ASSERT(
 	(HW_KIND != HW_KIND_tri_discrete && HW_KIND != HW_KIND_rgb_pwm && !HW_PIXEL) || HW_CHANNELS == 3,
 	"Three-color capability needs three channels"
 );
-BUILD_ASSERT(!HW_MIX || !HW_GPIO, "Binary GPIO outputs cannot implement dimmed mixed colors");
+BUILD_ASSERT(!HW_MIX || !HW_BINARY, "Binary outputs cannot implement dimmed mixed colors");
 #if HW_PWM
 #define PWM_CHANNEL(node, prop, index) PWM_DT_SPEC_GET_BY_IDX(node, index),
 static const struct pwm_dt_spec channels[] = {DT_FOREACH_PROP_ELEM(USER_NODE, pwms, PWM_CHANNEL)};
@@ -85,6 +90,10 @@ BUILD_ASSERT(DT_PROP_LEN(USER_NODE, pwms) == HW_CHANNELS, "Missing PWM channels"
 #define GPIO_CHANNEL(node, prop, index) GPIO_DT_SPEC_GET_BY_IDX(node, prop, index),
 static const struct gpio_dt_spec channels[] = {DT_FOREACH_PROP_ELEM(USER_NODE, led_channel_gpios, GPIO_CHANNEL)};
 BUILD_ASSERT(DT_PROP_LEN(USER_NODE, led_channel_gpios) == HW_CHANNELS, "Missing GPIO channels");
+#elif HW_LEDDEV
+static const struct device *const led_device = DEVICE_DT_GET(DT_PHANDLE(USER_NODE, led_device));
+#define HW_LEDDEV_CHANNEL DT_PROP_OR(USER_NODE, led_device_channel, 0)
+BUILD_ASSERT(HW_CHANNELS == 1, "LED-device transport drives a single binary channel");
 #elif HW_PIXEL
 #include <zephyr/drivers/led_strip.h>
 static const struct device *const pixel = DEVICE_DT_GET(DT_PHANDLE(USER_NODE, led_pixel));
@@ -104,7 +113,7 @@ static struct led_hardware_info hardware = {
 	.board_limit_pptt = HW_BOARD_LIMIT,
 	/* 0 explicitly means unmeasured: no supported optical minimum is claimed. */
 	.visible_min_pptt = DT_PROP_OR(USER_NODE, led_visible_min_pptt, 0),
-	.gpio = HW_GPIO,
+	.gpio = HW_BINARY,
 };
 /* Worker state is never exposed concurrently; only these two mutable fields
  * are published under a short lock after a bounded hardware operation. */
@@ -187,6 +196,9 @@ static int output_frame(const uint32_t frame[3], bool force)
 	for (size_t index = 0; index < HW_CHANNELS; index++) {
 #if HW_PWM
 		int error = pwm_set_pulse_dt(&channels[index], frame[index]);
+#elif HW_LEDDEV
+		int error = frame[index] ? led_on(led_device, HW_LEDDEV_CHANNEL + index)
+					 : led_off(led_device, HW_LEDDEV_CHANNEL + index);
 #else
 		int error = gpio_pin_set_dt(&channels[index], frame[index]);
 #endif
@@ -421,6 +433,8 @@ void led_hw_init(void)
 		);
 #elif HW_PWM
 		remember_error(pwm_is_ready_dt(&channels[index]) ? 0 : -ENODEV);
+#elif HW_LEDDEV
+		remember_error(device_is_ready(led_device) ? 0 : -ENODEV);
 #endif
 	}
 #if HW_PIXEL
