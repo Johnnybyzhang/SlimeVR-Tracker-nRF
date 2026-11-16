@@ -202,6 +202,18 @@ static bool ext_scanning_mode = true;
 #define LSM6DSV_SHUB_POLL_US 250
 #endif
 
+/* IF_CFG bit 0 (I2C_I3C_disable): on a four-wire SPI link, disable the primary
+ * I2C/I3C interface so SPI traffic cannot be misread as I2C/I3C. */
+static uint8_t lsm_if_cfg(uint8_t value)
+{
+#if defined(CONFIG_BOARD_TRACKER_REVF)
+	if (sensor_interface_get_spec(SENSOR_INTERFACE_DEV_IMU) == SENSOR_INTERFACE_SPEC_SPI) {
+		value |= 0x01;
+	}
+#endif
+	return value;
+}
+
 int lsm_init(
 	float clock_rate,
 	float accel_period_s,
@@ -257,7 +269,7 @@ int lsm_init(
 		if_cfg |= 0x40; // SHUB_PU_EN: enable internal pull-up for auxiliary I2C
 	}
 #endif
-	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, if_cfg);
+	err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, lsm_if_cfg(if_cfg));
 
 	uint8_t internal_freq_raw = 0;
 	err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_INTERNAL_FREQ_FINE, &internal_freq_raw); // affects ODR
@@ -756,7 +768,7 @@ uint8_t lsm_setup_WOM(void)
 	err |= ssi_reg_write_byte(
 		SENSOR_INTERFACE_DEV_IMU,
 		LSM6DSV_IF_CFG,
-		0x18
+		lsm_if_cfg(0x18)
 	); // INT H_LACTIVE active low, PP_OD open-drain
 	if (err) {
 		return 0xFF;
@@ -802,7 +814,7 @@ int lsm_ext_setup(enum sensor_ext_mode mode)
 		return err;
 	}
 	k_msleep(5);
-	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, 0x58);
+	err = ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, lsm_if_cfg(0x58));
 	if (err) {
 		return err;
 	}
