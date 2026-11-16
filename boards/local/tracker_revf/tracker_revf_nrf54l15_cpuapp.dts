@@ -1,0 +1,204 @@
+/*
+ * RevF nRF54L15 tracker (HJSIP nRF54L15 module, nPM1304 PMIC, 1.8 V rail).
+ * Pin contract: hardware/RevF/PIN_ASSIGNMENTS.md in the nrf54 workspace repo.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+#include <nordic/nrf54l15_cpuapp.dtsi>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/pinctrl/nrf-pinctrl.h>
+
+/ {
+	model = "RevF nRF54L15 tracker";
+	compatible = "local,tracker-revf";
+
+	chosen {
+		zephyr,sram = &cpuapp_sram;
+		zephyr,flash = &cpuapp_rram;
+		zephyr,flash-controller = &rram_controller;
+		zephyr,code-partition = &slot0_partition;
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+		/* MCU user button: tap events and hold-to-pair. Power is the
+		 * separate nPM1304 SHPHLD button, which is not wired to the MCU. */
+		user_button: button {
+			gpios = <&gpio1 10 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		};
+	};
+
+	aliases {
+		sw0 = &user_button;
+		watchdog0 = &wdt31;
+	};
+
+	zephyr,user {
+		/* LSM6DSV INT1 (P1.13); the driver selects pull/sense for WOM. */
+		int0-gpios = <&gpio1 13 0>;
+		/* Status LED: green D1 on nPM1304 LED1 (host mode), on/off only. */
+		led-capability = "mono-gpio";
+		led-device = <&pmic_leds>;
+		led-device-channel = <1>;
+		led-channel-colors = <2>;
+		led-channel-weights = <10000>;
+	};
+};
+
+&cpuapp_sram {
+	status = "okay";
+};
+
+/* 32.768 kHz crystal inside the HJSIP module on P1.00/P1.01: 9 pF load,
+ * +/-20 ppm (vendor data), using the nRF54L15's internal load caps. */
+&lfxo {
+	load-capacitors = "internal";
+	load-capacitance-femtofarad = <9000>;
+	status = "okay";
+};
+
+&grtc {
+	owned-channels = <0 1 2 3 4 5 6 7 8 9 10 11>;
+	child-owned-channels = <3 4 7 8 9 10 11>;
+	status = "okay";
+};
+
+&clock {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&gpio2 {
+	status = "okay";
+};
+
+&gpiote20 {
+	status = "okay";
+};
+
+&radio {
+	status = "okay";
+};
+
+&temp {
+	status = "okay";
+};
+
+&wdt31 {
+	status = "okay";
+};
+
+&pinctrl {
+	tracker_i2c: tracker_i2c {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 7)>, <NRF_PSEL(TWIM_SCL, 1, 11)>;
+		};
+	};
+
+	tracker_i2c_sleep: tracker_i2c_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 1, 7)>, <NRF_PSEL(TWIM_SCL, 1, 11)>;
+			low-power-enable;
+		};
+	};
+
+	tracker_spi: tracker_spi {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 2, 1)>, <NRF_PSEL(SPIM_MOSI, 2, 2)>;
+			nordic,drive-mode = <NRF_DRIVE_H0H1>;
+		};
+		group2 {
+			psels = <NRF_PSEL(SPIM_MISO, 2, 4)>;
+		};
+	};
+
+	tracker_spi_sleep: tracker_spi_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 2, 1)>, <NRF_PSEL(SPIM_MOSI, 2, 2)>,
+				<NRF_PSEL(SPIM_MISO, 2, 4)>;
+			low-power-enable;
+		};
+	};
+};
+
+/* Shared 100 kHz bus: nPM1304 (0x6b) and LIS2MDL (0x1e). 400 kHz is not
+ * qualified (rise time unmeasured). */
+&i2c21 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	pinctrl-0 = <&tracker_i2c>;
+	pinctrl-1 = <&tracker_i2c_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	pmic: npm1304@6b {
+		compatible = "nordic,npm1304";
+		reg = <0x6b>;
+		/* GPIO0 -> P1.06, active-high push-pull IRQ. */
+		host-int-gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
+		pmic-int-pin = <0>;
+		ship-to-active-time-ms = <96>;
+		long-press-reset = "one-button";
+
+		/* Charging policy for the protected 401220 80 mAh / 4.2 V cell,
+		 * validated on hardware: 40 mA, 4.2 V (4.1 V warm), 100 mA VBUS
+		 * input, 10k B3380 NTC with a 5..40 C guardband. The SDK driver
+		 * reapplies this on every boot. */
+		pmic_charger: charger {
+			compatible = "nordic,npm1304-charger";
+			charging-enable;
+			term-microvolt = <4200000>;
+			term-warm-microvolt = <4100000>;
+			current-microamp = <40000>;
+			vbus-limit-microamp = <100000>;
+			thermistor-ohms = <10000>;
+			thermistor-beta = <3380>;
+			thermistor-cold-millidegrees = <5000>;
+			thermistor-cool-millidegrees = <10000>;
+			thermistor-warm-millidegrees = <35000>;
+			thermistor-hot-millidegrees = <40000>;
+			dietemp-stop-millidegrees = <85000>;
+			dietemp-resume-millidegrees = <75000>;
+		};
+
+		/* Red D2 = LED0 (autonomous charging indicator), green D1 =
+		 * LED1 (host status). */
+		pmic_leds: leds {
+			compatible = "nordic,npm1304-led";
+			nordic,led0-mode = "charging";
+			nordic,led1-mode = "host";
+			nordic,led2-mode = "error";
+		};
+	};
+
+	mag: mag@1e {
+		compatible = "i2c-device";
+		reg = <0x1e>;
+	};
+};
+
+/* LSM6DSV on SPIM00. 4 MHz is the qualified ceiling at 1.8 V (61 ns raw
+ * MISO setup margin; 8 MHz is negative). Keep >= 1 us CS lead/trail. */
+&spi00 {
+	status = "okay";
+	max-frequency = <DT_FREQ_M(4)>;
+	cs-gpios = <&gpio2 5 GPIO_ACTIVE_LOW>;
+	pinctrl-0 = <&tracker_spi>;
+	pinctrl-1 = <&tracker_spi_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	imu_spi: imu@0 {
+		compatible = "vnd,spi-device";
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(4)>;
+		spi-cs-setup-delay-ns = <1000>;
+		spi-cs-hold-delay-ns = <1000>;
+	};
+};
+
+/* Replaced by the application's partition overlay (dts/partitions). */
+#include <vendor/nordic/nrf54l15_cpuapp_partition.dtsi>

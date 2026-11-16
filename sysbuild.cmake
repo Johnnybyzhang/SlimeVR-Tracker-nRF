@@ -119,6 +119,16 @@ if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54L15 AND
        ${mcuboot_overlay_dir}/mcuboot_nrf54l15_uart.conf)
 endif()
 
+if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54L15 AND
+   SB_CONFIG_BOARD STREQUAL "tracker_revf")
+  # RevF: no UART/USB recovery transport (SWD is the recovery path); keep
+  # PMIC/sensor buses off in the bootloader.
+  list(APPEND mcuboot_EXTRA_CONF_FILE
+       ${mcuboot_overlay_dir}/mcuboot_tracker_revf.conf)
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${mcuboot_overlay_dir}/mcuboot_tracker_revf.overlay)
+endif()
+
 if(SB_CONFIG_BOOTLOADER_MCUBOOT AND
    (SB_CONFIG_SOC_NRF52833 OR SB_CONFIG_SOC_NRF52840))
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE

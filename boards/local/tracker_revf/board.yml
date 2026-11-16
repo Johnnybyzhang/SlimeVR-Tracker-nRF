@@ -1,0 +1,6 @@
+board:
+  name: tracker_revf
+  full_name: RevF nRF54L15 tracker
+  vendor: local
+  socs:
+    - name: nrf54l15
