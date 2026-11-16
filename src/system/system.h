@@ -95,6 +95,9 @@ int sys_charger_snapshot(bool *charging, bool *charged);
  * positive: deliberate long-hold cancellation; negative: admission rejected
  * (not a pairing request). Protective/automatic paths never use this window. */
 int sys_user_shutdown(void);
+/* Request power-off (or reboot) with the user-exit LED feedback. Blocks for the
+ * feedback interval; do not call from a work queue or ISR. */
+int sys_user_exit_request(bool reboot);
 /* 0: asynchronous OFF request accepted; negative: admission rejected. */
 int sys_command_shutdown(void);
 int sys_command_shutdown_request(uint32_t request, uint32_t accepted_event, uint32_t terminal_event);

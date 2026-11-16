@@ -33,6 +33,7 @@
 #include "power.h"
 #include "power_request.h"
 #include "power_battery.h"
+#include "npm13xx_power_button.h"
 #include "clock_control.h"
 #include "connection/tracker_events.h"
 #if CONFIG_SENSOR_TCAL_HEATED
@@ -83,7 +84,7 @@ static int64_t wom_last_eligible;
 K_THREAD_DEFINE(disable_DFU_thread_id, 128, sys_skip_dfu, NULL, NULL, NULL, DISABLE_DFU_THREAD_PRIORITY, 0, 500); // skip DFU if the system is running correctly
 
 static void power_thread(void);
-K_THREAD_DEFINE(power_thread_id, 1024, power_thread, NULL, NULL, NULL, POWER_THREAD_PRIORITY, 0, 0);
+K_THREAD_DEFINE(power_thread_id, CONFIG_POWER_THREAD_STACK_SIZE, power_thread, NULL, NULL, NULL, POWER_THREAD_PRIORITY, 0, 0);
 
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 
@@ -203,6 +204,13 @@ static int sys_interface_action(enum pm_device_action action)
 		if (duplicate) {
 			continue;
 		}
+#if defined(CONFIG_BOARD_TRACKER_REVF)
+		/* RevF's magnetometer shares TWIM21 with the PMIC. OTA pauses the
+		 * sensors, but battery and LED workers must retain their I2C bus. */
+		if (buses[i] == DEVICE_DT_GET(DT_NODELABEL(i2c21))) {
+			continue;
+		}
+#endif
 		int err = pm_device_action_run(buses[i], action);
 		/* Repeated resume/suspend is part of the interface lifecycle. */
 		if (err && err != -EALREADY) {
@@ -794,6 +802,7 @@ static bool sys_system_off(void)
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
 	sys_skip_dfu();
 #endif
+	npm13xx_power_button_prepare_poweroff();
 	sys_enter_poweroff();
 	return true;
 }
@@ -980,7 +989,32 @@ static void power_thread(void)
 		 * clearing the WDT reset counter, allowing multiple WDT resets to
 		 * accumulate and eventually trigger DFU mode if there's a persistent issue.
 		 */
-		if (!boot_success_checked && system_uptime_since_boot_ms() > 60000) {
+		bool confirm_ready = true;
+#if CONFIG_MCUBOOT_CONFIRM_REQUIRE_LINK
+		/* A trial image is kept only once it has proven a working receiver
+		 * link (paired, recent PONG round trip). Confirming an image whose
+		 * radio is broken would leave no wireless way back. Rebooting before
+		 * confirmation makes MCUboot revert to the previous image. Only a
+		 * revertible trial is gated: a freshly programmed image is merely
+		 * unconfirmed and has nothing to revert to. */
+		static int boot_swap_type = -1; /* fixed for this boot; query (and log) once */
+		if (!boot_success_checked && system_uptime_since_boot_ms() > 60000 && boot_swap_type < 0) {
+			boot_swap_type = mcuboot_swap_type();
+		}
+		if (!boot_success_checked && system_uptime_since_boot_ms() > 60000
+			&& !boot_is_img_confirmed() && boot_swap_type == BOOT_SWAP_TYPE_REVERT) {
+			struct led_connection_facts link = {0};
+			esb_led_connection_facts(&link);
+			confirm_ready = link.healthy;
+			if (!confirm_ready && system_uptime_since_boot_ms()
+				> CONFIG_MCUBOOT_CONFIRM_LINK_DEADLINE_MS) {
+				LOG_ERR("Trial image has no receiver link; rebooting to revert");
+				wait_for_logging();
+				sys_reboot(SYS_REBOOT_COLD);
+			}
+		}
+#endif
+		if (confirm_ready && !boot_success_checked && system_uptime_since_boot_ms() > 60000) {
 			boot_success_checked = true;
 #if defined(CONFIG_BOOTLOADER_MCUBOOT)
 			if (!boot_is_img_confirmed()) {
@@ -1067,11 +1101,14 @@ static void power_thread(void)
 
 		bool abnormal_reading = battery_mV < 100 || battery_mV > 6000;
 		bool battery_available = battery_mV > 1500 && !abnormal_reading; // Keep working without the battery connected, otherwise it is obviously too dead to boot system
-		// Separate detection of vin
+#if !DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(pmic_charger))
+		// Separate detection of vin. A PMIC charger reports VBUS and charge
+		// state directly, so voltage inference is only for divider boards.
 		if (!plugged && battery_mV > 4300 && !abnormal_reading)
 			plugged = true;
 		else if ((plugged && battery_mV <= 4250) || abnormal_reading)
 			plugged = false;
+#endif
 		bool raw_device_plugged = confirmed_charging || confirmed_charged || plugged
 			|| usb_plugged || pmic_plugged || sampled_plugged || gpio_plugged;
 #if CONFIG_SENSOR_TCAL_HEATED
@@ -1127,6 +1164,12 @@ static void power_thread(void)
 		);
 
 		enum led_power_state led_power = LED_POWER_BATTERY;
+		bool led_low = power_battery_is_low();
+#if !CONFIG_LED_CHARGE_INDICATION
+		/* The charger drives its own charge indicator; keep the status LED on
+		 * its ordinary patterns and do not warn of low battery while powered. */
+		led_low = led_low && !device_plugged;
+#else
 		if (device_plugged) {
 			if (confirmed_charging) {
 				led_power = LED_POWER_CHARGING;
@@ -1136,7 +1179,8 @@ static void power_thread(void)
 				led_power = LED_POWER_EXTERNAL_UNKNOWN;
 			}
 		}
-		led_power_publish(led_power, power_battery_is_low());
+#endif
+		led_power_publish(led_power, led_low);
 
 		/* Feed watchdog at end of each loop iteration */
 		watchdog_feed(WDT_CHANNEL_POWER);
