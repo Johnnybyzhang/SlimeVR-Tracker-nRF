@@ -88,6 +88,31 @@ config BATTERY_NO_MAPPING
 
 endchoice
 
+config BATTERY_FUEL_GAUGE
+    bool "nRF Fuel Gauge state of charge (nPM13xx charger)"
+    depends on DT_HAS_NORDIC_NPM1300_CHARGER_ENABLED || DT_HAS_NORDIC_NPM1304_CHARGER_ENABLED
+    select NRF_FUEL_GAUGE
+    help
+      Estimate state of charge with Nordic's nRF Fuel Gauge from the PMIC's
+      voltage, current and NTC temperature, instead of the voltage mapping.
+      The estimator starts from measured values on each boot. The learned
+      runtime curve is bypassed: the gauge is already model based.
+
+config POWER_THREAD_STACK_SIZE
+    int "Power thread stack size"
+    default 2048 if BATTERY_FUEL_GAUGE
+    default 1024
+    help
+      The power thread samples the battery; nRF Fuel Gauge processing
+      raises its peak use (measured 1304 B on RevF).
+
+config BATTERY_FUEL_GAUGE_MODEL
+    string "Battery model include file"
+    depends on BATTERY_FUEL_GAUGE
+    default "battery_models/generic_80mAh.inc"
+    help
+      nRF Fuel Gauge secondary-cell model, relative to src/system.
+
 config LED_GLOBAL_BRIGHTNESS_PPTT
     int "Global LED brightness (pptt)"
     range 0 10000
@@ -108,6 +133,14 @@ config LED_NETWORK_SYNC
         wrap may alter one interval; subsequent periods are unchanged.
 
 menu "Thread stack sizes"
+
+config LED_CHARGE_INDICATION
+    bool "Show charging/charged state on the status LED"
+    default y
+    help
+        Disable when the charger has its own charge indicator LED (for example
+        an nPM13xx LED in "charging" mode). The status LED then keeps its
+        ordinary patterns while external power is present.
 
 config LED_THREAD_STACK_SIZE
     int "LED thread stack size"
@@ -160,6 +193,14 @@ config IGNORE_RESET
     help
         If sw0 is available, don't perform any extra actions on reset.
 
+config USER_BUTTON_REBOOT
+    bool "sw0 single press and hold reboot"
+    default y
+    help
+        A single sw0 press, and a hold when user shutdown is disabled, reboot
+        the tracker. Disable on boards with a dedicated power button: sw0
+        then only reports clicks and keeps its multi-press actions.
+
 config USER_SHUTDOWN
     bool "User shutdown support"
     default y
@@ -174,6 +215,35 @@ config IGNORE_CHARGE_WAKE_ON_VBUS
         When VBUS is present, do not configure charge status pins as wake
         sources during system shutdown. This keeps charge state transitions
         from waking the device while USB power is already connected.
+
+config MCUBOOT_CONFIRM_REQUIRE_LINK
+    bool "Confirm MCUboot trial images only after a receiver link"
+    depends on BOOTLOADER_MCUBOOT
+    help
+        Besides 60 s of healthy uptime, require a live receiver link (paired,
+        recent PONG round trip) before confirming a trial image. Without one
+        by MCUBOOT_CONFIRM_LINK_DEADLINE_MS, reboot so MCUboot reverts to the
+        previous image, keeping a radio-broken update recoverable over ESB.
+
+config MCUBOOT_CONFIRM_LINK_DEADLINE_MS
+    int "Receiver link deadline for trial images (ms)"
+    depends on MCUBOOT_CONFIRM_REQUIRE_LINK
+    default 180000
+    range 60000 3600000
+
+config NPM13XX_POWER_BUTTON
+    bool "nPM13xx SHPHLD power button"
+    depends on MFD_NPM13XX && (DT_HAS_NORDIC_NPM1300_CHARGER_ENABLED || DT_HAS_NORDIC_NPM1304_CHARGER_ENABLED)
+    help
+        Hold the PMIC SHPHLD button and release to power off. On battery
+        the PMIC enters ship mode; with USB present the MCU enters SYSTEMOFF
+        with charging left running. A button press wakes it. Requires the
+        PMIC interrupt line (host-int-gpios).
+
+config NPM13XX_POWER_BUTTON_HOLD_MS
+    int "Power button hold time (ms)"
+    depends on NPM13XX_POWER_BUTTON
+    default 2000
 
 config USE_IMU_WAKE_UP
     bool "IMU wake up support"

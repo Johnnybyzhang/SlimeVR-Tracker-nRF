@@ -1,0 +1,13 @@
+/* RevF MCUboot: nothing on the PMIC/sensor buses is needed to boot. The PMIC
+ * keeps its autonomous charger configuration while the bootloader runs. */
+&i2c21 {
+	status = "disabled";
+};
+
+&spi00 {
+	status = "disabled";
+};
+
+&wdt31 {
+	status = "disabled";
+};

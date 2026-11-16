@@ -1,0 +1,14 @@
+identifier: tracker_revf/nrf54l15/cpuapp
+name: RevF-nRF54L15-tracker
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+ram: 188
+flash: 1428
+supported:
+  - gpio
+  - i2c
+  - spi
+  - watchdog
+vendor: local

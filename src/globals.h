@@ -83,6 +83,12 @@
 #define SENSOR_MAGNETOMETER_AXES_ALIGNMENT -mx, -my, mz
 #endif
 
+#if defined(CONFIG_BOARD_TRACKER_REVF)
+/* LSM6DSV raw-to-board is identity; LIS2MDL raw frame is left-handed, so
+ * raw (Y, X, Z) maps it onto the IMU frame (a reflection, not a rotation). */
+#define SENSOR_MAGNETOMETER_AXES_ALIGNMENT my, mx, mz
+#endif
+
 #ifdef CONFIG_SENSOR_ROTATION_0
 #define SENSOR_QUATERNION_CORRECTION 1.0f, 0.0f, 0.0f, 0.0f
 #elif defined(CONFIG_SENSOR_ROTATION_90)

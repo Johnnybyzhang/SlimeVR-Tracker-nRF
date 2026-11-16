@@ -100,7 +100,17 @@ if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54LM20A)
   endif()
 endif()
 
-if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54L15)
+if(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54L15 AND
+   SB_CONFIG_BOARD STREQUAL "tracker_revf")
+  # RevF: no UART/USB recovery transport (SWD is the recovery path); keep
+  # PMIC/sensor buses off in the bootloader and feed the app's watchdog
+  # through swaps and reverts.
+  list(APPEND mcuboot_EXTRA_CONF_FILE
+       ${mcuboot_overlay_dir}/mcuboot_tracker_revf.conf)
+  list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
+       ${mcuboot_overlay_dir}/mcuboot_tracker_revf.overlay)
+elseif(SB_CONFIG_BOOTLOADER_MCUBOOT AND SB_CONFIG_SOC_NRF54L15)
+  # The shared overlay disables XIAO-specific nodes.
   list(APPEND mcuboot_EXTRA_DTC_OVERLAY_FILE
        ${mcuboot_overlay_dir}/mcuboot_nrf54l15.overlay)
   if(SB_CONFIG_BOARD STREQUAL "xiao_nrf54l15")
