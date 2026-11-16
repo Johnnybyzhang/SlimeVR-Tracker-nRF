@@ -311,6 +311,149 @@ int battery_sample(void) {
 #endif
 }
 
+#if USE_PMIC_CHARGER && CONFIG_BATTERY_FUEL_GAUGE
+#include <nrf_fuel_gauge.h>
+
+/* nPM13xx BCHGCHARGESTATUS bits */
+#define CHG_STATUS_COMPLETE BIT(1)
+#define CHG_STATUS_TRICKLE BIT(2)
+#define CHG_STATUS_CC BIT(3)
+#define CHG_STATUS_CV BIT(4)
+
+static const struct battery_model fuel_gauge_model = {
+#include CONFIG_BATTERY_FUEL_GAUGE_MODEL
+};
+static bool fuel_gauge_ready;
+static int64_t fuel_gauge_ref_ms;
+static int32_t fuel_gauge_chg_status;
+
+static float sensor_float(const struct sensor_value *value)
+{
+	return (float)value->val1 + (float)value->val2 / 1000000.0f;
+}
+
+static int fuel_gauge_inform_charge_state(int32_t status)
+{
+	union nrf_fuel_gauge_ext_state_info_data state = {
+		.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_IDLE,
+	};
+	if (status & CHG_STATUS_COMPLETE) {
+		state.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_COMPLETE;
+	} else if (status & CHG_STATUS_TRICKLE) {
+		state.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_TRICKLE;
+	} else if (status & CHG_STATUS_CC) {
+		state.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_CC;
+	} else if (status & CHG_STATUS_CV) {
+		state.charge_state = NRF_FUEL_GAUGE_CHARGE_STATE_CV;
+	}
+	return nrf_fuel_gauge_ext_state_update(NRF_FUEL_GAUGE_EXT_STATE_INFO_CHARGE_STATE_CHANGE,
+					       &state);
+}
+
+static int fuel_gauge_start(float voltage, float current, float temp)
+{
+	struct nrf_fuel_gauge_init_parameters parameters =
+		NRF_FUEL_GAUGE_DEFAULT_INIT_PARAMETERS_SECONDARY(voltage, current, temp,
+								 &fuel_gauge_model);
+	int rc = nrf_fuel_gauge_init(&parameters, NULL);
+	if (rc) {
+		return rc;
+	}
+
+	/* Charge and termination currents come from the devicetree charger
+	 * configuration; the gauge never changes them. */
+	struct sensor_value value;
+	rc = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_DESIRED_CHARGING_CURRENT, &value);
+	if (rc) {
+		return rc;
+	}
+	float limit = sensor_float(&value);
+	rc = nrf_fuel_gauge_ext_state_update(NRF_FUEL_GAUGE_EXT_STATE_INFO_CHARGE_CURRENT_LIMIT,
+		&(union nrf_fuel_gauge_ext_state_info_data){.charge_current_limit = limit});
+	if (rc) {
+		return rc;
+	}
+	rc = nrf_fuel_gauge_ext_state_update(NRF_FUEL_GAUGE_EXT_STATE_INFO_TERM_CURRENT,
+		&(union nrf_fuel_gauge_ext_state_info_data){
+			.charge_term_current = limit * DT_PROP(PMIC_CHARGER, term_current_percent) / 100.0f});
+	if (rc) {
+		return rc;
+	}
+	fuel_gauge_chg_status = -1;
+	fuel_gauge_ref_ms = k_uptime_get();
+	LOG_INF("nRF Fuel Gauge %s started: %s", nrf_fuel_gauge_version, fuel_gauge_model.name);
+	return 0;
+}
+
+/* Uses the sample fetched by battery_sample(). Returns SOC in pptt or a
+ * negative error; invalid measurements suppress the SOC instead of inventing
+ * one. */
+static int fuel_gauge_pptt(int voltage_mV)
+{
+	struct sensor_value value;
+	int rc = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_AVG_CURRENT, &value);
+	if (rc) {
+		return rc;
+	}
+	/* Zephyr: negative current discharges. nRF Fuel Gauge: positive discharges. */
+	float current = -sensor_float(&value);
+	rc = sensor_channel_get(charger, SENSOR_CHAN_GAUGE_TEMP, &value);
+	if (rc) {
+		return rc;
+	}
+	float temp = sensor_float(&value);
+	rc = sensor_channel_get(charger, SENSOR_CHAN_NPM13XX_CHARGER_STATUS, &value);
+	if (rc) {
+		return rc;
+	}
+	int32_t status = value.val1;
+	rc = sensor_attr_get(charger, SENSOR_CHAN_NPM13XX_CHARGER_VBUS_STATUS,
+		SENSOR_ATTR_NPM13XX_CHARGER_VBUS_PRESENT, &value);
+	if (rc) {
+		return rc;
+	}
+	bool vbus = value.val1 != 0;
+
+	float voltage = voltage_mV / 1000.0f;
+	if (voltage < 2.0f || voltage > 4.5f || !isfinite(current) || !isfinite(temp)
+		|| temp < -40.0f || temp > 85.0f) {
+		if (voltage < 2.0f) {
+			fuel_gauge_ready = false; /* Battery absent: restart from the next valid cell. */
+		}
+		return -ERANGE;
+	}
+	if (!fuel_gauge_ready) {
+		rc = fuel_gauge_start(voltage, current, temp);
+		if (rc) {
+			LOG_ERR("nRF Fuel Gauge start failed: %d", rc);
+			return rc;
+		}
+		fuel_gauge_ready = true;
+	}
+
+	rc = nrf_fuel_gauge_ext_state_update(vbus ? NRF_FUEL_GAUGE_EXT_STATE_INFO_VBUS_CONNECTED
+						  : NRF_FUEL_GAUGE_EXT_STATE_INFO_VBUS_DISCONNECTED, NULL);
+	if (!rc && status != fuel_gauge_chg_status) {
+		rc = fuel_gauge_inform_charge_state(status);
+		if (!rc) {
+			fuel_gauge_chg_status = status;
+		}
+	}
+	float soc;
+	if (!rc) {
+		float delta = MAX((float)k_uptime_delta(&fuel_gauge_ref_ms) / 1000.0f, 0.001f);
+		rc = nrf_fuel_gauge_process(voltage, current, temp, delta, &soc, NULL);
+	}
+	if (!rc && !isfinite(soc)) {
+		rc = -ERANGE;
+	}
+	if (rc) {
+		return rc;
+	}
+	return (int)(CLAMP(soc, 0.0f, 100.0f) * 100.0f + 0.5f);
+}
+#endif
+
 int battery_charger_state(bool *plugged, bool *charging, bool *charged)
 {
 #if USE_PMIC_CHARGER
@@ -387,7 +530,7 @@ battery_level_pptt(unsigned int batt_mV, const struct battery_level_point* curve
 			/ (pa->lvl_mV - pb->lvl_mV));
 }
 
-static const struct battery_level_point levels[] = {
+static const struct battery_level_point __maybe_unused levels[] = {
 #if CONFIG_BATTERY_USE_REG_BUCK_MAPPING
 	{10000, 4150},
 	{9500, 4075},
@@ -441,5 +584,9 @@ int read_batt_mV(int* out) {
 		return batt_mV;
 	}
 
+#if USE_PMIC_CHARGER && CONFIG_BATTERY_FUEL_GAUGE
+	return fuel_gauge_pptt(batt_mV);
+#else
 	return (int)battery_level_pptt((unsigned int)batt_mV, levels);
+#endif
 }

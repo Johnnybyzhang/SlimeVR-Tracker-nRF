@@ -228,5 +228,9 @@ void power_battery_feed_and_track(bool battery_pptt_valid, bool plug_signal_sett
 		&& (samples == BATTERY_SAMPLES || device_plugged))
 		sys_update_battery_tracker(current_battery_pptt, device_plugged);
 	if (current_battery_pptt_valid)
-		calibrated_battery_pptt = sys_get_calibrated_battery_pptt(current_battery_pptt);
+		/* A fuel-gauge SOC is already model based; do not reshape it with the
+		 * curve learned for voltage-mapped estimates. */
+		calibrated_battery_pptt = IS_ENABLED(CONFIG_BATTERY_FUEL_GAUGE)
+			? current_battery_pptt
+			: sys_get_calibrated_battery_pptt(current_battery_pptt);
 }
