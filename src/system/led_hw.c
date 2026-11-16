@@ -5,7 +5,6 @@
 #include <errno.h>
 #include <string.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/led.h>
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/kernel.h>
 #include <zephyr/pm/device.h>
@@ -43,6 +42,9 @@ BUILD_ASSERT(
  * I2C). Only the LED worker calls it, so blocking bus writes are permitted. */
 #define HW_LEDDEV (!HW_PIXEL && HW_KIND != HW_KIND_no_led && DT_NODE_HAS_PROP(USER_NODE, led_device))
 #define HW_BINARY (HW_GPIO || HW_LEDDEV)
+#if HW_LEDDEV
+#include <zephyr/drivers/led.h>
+#endif
 #define HW_GATE DT_NODE_HAS_PROP(USER_NODE, led_en_gpios)
 #define HW_MIX (HW_KIND == HW_KIND_rg_mix || HW_KIND == HW_KIND_rgb_pwm || HW_PIXEL)
 #define HW_RGB (HW_KIND == HW_KIND_rgb_pwm || HW_PIXEL)

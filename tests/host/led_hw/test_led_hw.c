@@ -59,6 +59,16 @@ int gpio_pin_set_dt(const struct gpio_dt_spec *gpio, int value)
 	output[gpio->pin - 10] = value;
 	return 0;
 }
+int led_on(const struct device *device, uint32_t channel)
+{
+	assert(device == &host_device && channel == 1);
+	return gpio_pin_set_dt(&(struct gpio_dt_spec){.pin = 10}, 1);
+}
+int led_off(const struct device *device, uint32_t channel)
+{
+	assert(device == &host_device && channel == 1);
+	return gpio_pin_set_dt(&(struct gpio_dt_spec){.pin = 10}, 0);
+}
 int pwm_set_pulse_dt(const struct pwm_dt_spec *pwm, uint32_t pulse)
 {
 	writes++;

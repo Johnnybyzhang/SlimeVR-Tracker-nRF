@@ -802,7 +802,9 @@ static bool sys_system_off(void)
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
 	sys_skip_dfu();
 #endif
+#if CONFIG_NPM13XX_POWER_BUTTON
 	npm13xx_power_button_prepare_poweroff();
+#endif
 	sys_enter_poweroff();
 	return true;
 }
@@ -1101,7 +1103,7 @@ static void power_thread(void)
 
 		bool abnormal_reading = battery_mV < 100 || battery_mV > 6000;
 		bool battery_available = battery_mV > 1500 && !abnormal_reading; // Keep working without the battery connected, otherwise it is obviously too dead to boot system
-#if !DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(pmic_charger))
+#if !defined(CONFIG_BOARD_TRACKER_REVF)
 		// Separate detection of vin. A PMIC charger reports VBUS and charge
 		// state directly, so voltage inference is only for divider boards.
 		if (!plugged && battery_mV > 4300 && !abnormal_reading)
@@ -1165,7 +1167,7 @@ static void power_thread(void)
 
 		enum led_power_state led_power = LED_POWER_BATTERY;
 		bool led_low = power_battery_is_low();
-#if !CONFIG_LED_CHARGE_INDICATION
+#if defined(CONFIG_LED_CHARGE_INDICATION) && !CONFIG_LED_CHARGE_INDICATION
 		/* The charger drives its own charge indicator; keep the status LED on
 		 * its ordinary patterns and do not warn of low battery while powered. */
 		led_low = led_low && !device_plugged;

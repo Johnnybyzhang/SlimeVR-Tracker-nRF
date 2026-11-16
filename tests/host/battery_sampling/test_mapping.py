@@ -15,7 +15,7 @@ ROOT = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2]))
 battery = (ROOT / "src/system/battery.c").read_text()
 production = "\n".join((
     extract_block(battery, r"^unsigned int\s+battery_level_pptt\([^;]*\)\s*\{"),
-    extract_block(battery, r"^static const struct battery_level_point levels\[\]\s*=\s*\{", semicolon=True),
+    extract_block(battery, r"^static const struct battery_level_point (?:__maybe_unused )?levels\[\]\s*=\s*\{", semicolon=True),
     extract_block(battery, r"^int read_batt_mV\([^;]*\)\s*\{"),
 ))
 prefix = r'''
@@ -25,6 +25,7 @@ prefix = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include "system/battery.h"
+#define __maybe_unused __attribute__((unused))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define DT_PROP_OR(node, prop, default_value) (default_value)
 #define LOG_ERR(...) ((void)0)

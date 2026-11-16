@@ -375,7 +375,9 @@ void configure_sense_pins(void)
 	charger_stat_sense_armed = true;
 	k_mutex_unlock(&charger_stat_lock);
 #endif
+#if CONFIG_NPM13XX_POWER_BUTTON
 	npm13xx_power_button_arm_wake();
+#endif
 	// Configure sw0 sense
 #if BUTTON_EXISTS // Alternate button if available to use as "reset key"
 	nrf_gpio_cfg_input(NRF_DT_GPIOS_TO_PSEL(DT_ALIAS(sw0), gpios), NRF_GPIO_PIN_PULLUP);

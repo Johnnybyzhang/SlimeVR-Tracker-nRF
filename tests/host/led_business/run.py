@@ -93,6 +93,20 @@ packet_start = sensor.index("\t// Check packet processing")
 packet_end = sensor.index("\tsensor_int_during_loop = false;", packet_start) + len("\tsensor_int_during_loop = false;")
 sensor_fault_production += "static void host_sensor_packet_check(const struct host_sensor_frame *frame) {\n"
 sensor_fault_production += sensor[packet_start:packet_end] + "\n}\n"
+# Supply the optional board configuration for extracted button paths.
+button_config = """
+#ifndef CONFIG_USER_BUTTON_REBOOT
+#define CONFIG_USER_BUTTON_REBOOT 1
+#endif
+#ifndef USER_SHUTDOWN_ENABLED
+#define USER_SHUTDOWN_ENABLED 0
+#endif
+#ifndef IS_ENABLED
+#define IS_ENABLED(value) (value)
+#endif
+""" + re.search(r"^#define BUTTON_HOLD_ACTION .*?$", system, re.MULTILINE).group() + "\n"
+button_production = button_config + button_production
+manual_production = button_config + manual_production
 with tempfile.TemporaryDirectory(prefix="tracker-led-business-") as directory:
     temporary = Path(directory)
     (temporary / "production.inc").write_text(production)
