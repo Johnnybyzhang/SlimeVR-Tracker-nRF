@@ -15,6 +15,7 @@
 #if CONFIG_SENSOR_TCAL_HEATED
 #include "sensor/calibration/tcal_heated.h"
 #endif
+#include "system/npm13xx_power_button.h"
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
@@ -373,6 +374,7 @@ void configure_sense_pins(void)
 	charger_stat_sense_armed = true;
 	k_mutex_unlock(&charger_stat_lock);
 #endif
+	npm13xx_power_button_arm_wake();
 	// Configure sw0 sense
 #if BUTTON_EXISTS // Alternate button if available to use as "reset key"
 	nrf_gpio_cfg_input(NRF_DT_GPIOS_TO_PSEL(DT_ALIAS(sw0), gpios), NRF_GPIO_PIN_PULLUP);
@@ -1171,6 +1173,9 @@ static uint32_t press_generation;
 static uint32_t last_press_generation;
 bool button_held_from_init;
 
+/* Whether a >1 s hold has an action (shutdown or reboot) worth prompting. */
+#define BUTTON_HOLD_ACTION (USER_SHUTDOWN_ENABLED || IS_ENABLED(CONFIG_USER_BUTTON_REBOOT))
+
 static void button_interrupt_handler(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
 	int level = gpio_pin_get_dt(&button0);
@@ -1194,7 +1199,9 @@ static void button_interrupt_handler(const struct device *dev, struct gpio_callb
 		press_time = current_time;
 		press_generation = led_button_input();
 		/* Feedback facts only: all hardware remains owned by the LED worker. */
-		led_button_hold(press_generation, true, (uint32_t)current_time);
+		if (BUTTON_HOLD_ACTION) {
+			led_button_hold(press_generation, true, (uint32_t)current_time);
+		}
 		return;
 	}
 	if (press_generation) {
@@ -1206,7 +1213,7 @@ static void button_interrupt_handler(const struct device *dev, struct gpio_callb
 		}
 		/* A qualified release keeps its visual phase until atomic handoff.
 		 * Clearing it here would expose background before the thread polls. */
-		if (duration < LED_BUTTON_HOLD_MS) {
+		if (duration < LED_BUTTON_HOLD_MS || !BUTTON_HOLD_ACTION) {
 			led_button_hold(press_generation, false, 0);
 		}
 		press_time = 0;
@@ -1347,8 +1354,13 @@ static void button_thread(void)
 #if HEATED_BUTTON_EXISTS
 		heated_button_poll(ota_busy);
 #endif
-		bool qualified_hold = released_hold
-			|| (hold_generation && k_uptime_get() - original_press_time >= LED_BUTTON_HOLD_MS && button_read());
+		if (released_hold && !BUTTON_HOLD_ACTION) {
+			/* No hold action on this board: a long press is simply ignored. */
+			button_press_cancel(original_press_time);
+			button_status_clear_if_idle();
+		}
+		bool qualified_hold = BUTTON_HOLD_ACTION && (released_hold
+			|| (hold_generation && k_uptime_get() - original_press_time >= LED_BUTTON_HOLD_MS && button_read()));
 		if (qualified_hold) {
 			/* The hold owns this gesture. An earlier short release's quiet
 			 * deadline must not queue reboot before its qualified shutdown. */
@@ -1359,7 +1371,8 @@ static void button_thread(void)
 			LOG_INF("Button was pressed %d times", num_presses);
 			/* Nonterminal groups retain their exact count train. One click is a
 			 * terminal reboot gesture and owns only its manual exit cue. */
-			if (num_presses != 1 && !press_generation && !button_read()) {
+			if ((num_presses != 1 || !IS_ENABLED(CONFIG_USER_BUTTON_REBOOT))
+				&& !press_generation && !button_read()) {
 				enum led_admission feedback = led_button_group(group_generation, (uint32_t)num_presses);
 				if (feedback == LED_INVALID) {
 					LOG_WRN("Button count feedback exceeds deadline limit: %d", num_presses);
@@ -1372,7 +1385,7 @@ static void button_thread(void)
 			if (ota_busy) {
 				LOG_INF("Button action blocked by OTA");
 				led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_REJECTED);
-			} else if (num_presses == 1) {
+			} else if (num_presses == 1 && IS_ENABLED(CONFIG_USER_BUTTON_REBOOT)) {
 				if (test_mode_get()) {
 					LOG_INF("Button reboot blocked by test mode");
 					led_request_event(LED_OWNER_SYSTEM, led_request_id(), led_event_id(), LED_REJECTED);
@@ -1526,6 +1539,11 @@ static int sys_manual_exit_request(bool reboot, uint32_t request, uint32_t hold_
 		else led_request_event(LED_OWNER_SYSTEM, request, led_event_id(), LED_REJECTED);
 	}
 	return err;
+}
+
+int sys_user_exit_request(bool reboot)
+{
+	return sys_manual_exit_request(reboot, led_request_id(), 0);
 }
 
 #if BUTTON_EXISTS

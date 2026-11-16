@@ -33,6 +33,7 @@
 #include "power.h"
 #include "power_request.h"
 #include "power_battery.h"
+#include "npm13xx_power_button.h"
 #include "clock_control.h"
 #include "connection/tracker_events.h"
 #if CONFIG_SENSOR_TCAL_HEATED
@@ -83,7 +84,7 @@ static int64_t wom_last_eligible;
 K_THREAD_DEFINE(disable_DFU_thread_id, 128, sys_skip_dfu, NULL, NULL, NULL, DISABLE_DFU_THREAD_PRIORITY, 0, 500); // skip DFU if the system is running correctly
 
 static void power_thread(void);
-K_THREAD_DEFINE(power_thread_id, 1024, power_thread, NULL, NULL, NULL, POWER_THREAD_PRIORITY, 0, 0);
+K_THREAD_DEFINE(power_thread_id, CONFIG_POWER_THREAD_STACK_SIZE, power_thread, NULL, NULL, NULL, POWER_THREAD_PRIORITY, 0, 0);
 
 #define ZEPHYR_USER_NODE DT_PATH(zephyr_user)
 
@@ -803,6 +804,7 @@ static bool sys_system_off(void)
 #if ADAFRUIT_BOOTLOADER // if using Adafruit bootloader, always skip dfu for next boot
 	sys_skip_dfu();
 #endif
+	npm13xx_power_button_prepare_poweroff();
 	sys_enter_poweroff();
 	return true;
 }
@@ -1118,11 +1120,14 @@ static void power_thread(void)
 
 		bool abnormal_reading = battery_mV < 100 || battery_mV > 6000;
 		bool battery_available = battery_mV > 1500 && !abnormal_reading; // Keep working without the battery connected, otherwise it is obviously too dead to boot system
-		// Separate detection of vin
+#if !DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(pmic_charger))
+		// Separate detection of vin. A PMIC charger reports VBUS and charge
+		// state directly, so voltage inference is only for divider boards.
 		if (!plugged && battery_mV > 4300 && !abnormal_reading)
 			plugged = true;
 		else if ((plugged && battery_mV <= 4250) || abnormal_reading)
 			plugged = false;
+#endif
 		bool raw_device_plugged = confirmed_charging || confirmed_charged || plugged
 			|| usb_plugged || pmic_plugged || sampled_plugged || gpio_plugged;
 #if CONFIG_SENSOR_TCAL_HEATED
@@ -1178,6 +1183,12 @@ static void power_thread(void)
 		);
 
 		enum led_power_state led_power = LED_POWER_BATTERY;
+		bool led_low = power_battery_is_low();
+#if !CONFIG_LED_CHARGE_INDICATION
+		/* The charger drives its own charge indicator; keep the status LED on
+		 * its ordinary patterns and do not warn of low battery while powered. */
+		led_low = led_low && !device_plugged;
+#else
 		if (device_plugged) {
 			if (confirmed_charging) {
 				led_power = LED_POWER_CHARGING;
@@ -1187,7 +1198,8 @@ static void power_thread(void)
 				led_power = LED_POWER_EXTERNAL_UNKNOWN;
 			}
 		}
-		led_power_publish(led_power, power_battery_is_low());
+#endif
+		led_power_publish(led_power, led_low);
 
 		/* Feed watchdog at end of each loop iteration */
 		watchdog_feed(WDT_CHANNEL_POWER);
