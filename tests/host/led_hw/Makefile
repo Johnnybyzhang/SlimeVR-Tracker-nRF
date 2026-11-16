@@ -5,7 +5,7 @@ DEPS = test_led_hw.c globals.h Makefile ../../../src/system/led_hw.c ../../../sr
        ../../../src/system/led_internal.h ../../../src/system/led_strip_fade.h \
        ../../../src/system/led_timeline.c ../../../src/system/led_behavior.c \
        zephyr/kernel.h zephyr/drivers/gpio.h zephyr/drivers/pwm.h zephyr/drivers/led_strip.h zephyr/pm/device.h
-BINS = test_noled test_gpio test_gpio_ungated test_gpio_dim test_gpio_muted test_mono_pwm test_mono_pwm_muted \
+BINS = test_leddev test_leddev_muted test_noled test_gpio test_gpio_ungated test_gpio_dim test_gpio_muted test_mono_pwm test_mono_pwm_muted \
        test_dual_pwm test_dual_unknown test_dual_gpio test_rg_mix test_tri_pwm test_tri_gpio \
        test_rgb_pwm test_rgb_rbg_inverted test_rgb_limited test_pixel test_pixel_factory_dim \
        test_pixel_p10_default test_pixel_muted test_pixel_ungated test_dual_primary \
@@ -20,6 +20,8 @@ define fixture
 test_$(1): $(DEPS)
 	$(CC) $(FLAGS) $(2) -o $$@ $$<
 endef
+$(eval $(call fixture,leddev,-DHOST_KIND=1 -DHOST_KIND_TOKEN=mono_gpio -DHOST_LEDDEV=1 -DHOST_GATE=0))
+$(eval $(call fixture,leddev_muted,-DHOST_KIND=1 -DHOST_KIND_TOKEN=mono_gpio -DHOST_LEDDEV=1 -DHOST_GATE=0 -DCONFIG_LED_GLOBAL_BRIGHTNESS_PPTT=0))
 $(eval $(call fixture,noled,-DHOST_KIND=0 -DHOST_KIND_TOKEN=no_led))
 $(eval $(call fixture,gpio,-DHOST_KIND=1 -DHOST_KIND_TOKEN=mono_gpio))
 $(eval $(call fixture,gpio_ungated,-DHOST_KIND=1 -DHOST_KIND_TOKEN=mono_gpio -DHOST_GATE=0 -DHOST_POLARITY=1))

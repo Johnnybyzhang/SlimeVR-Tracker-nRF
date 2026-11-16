@@ -81,7 +81,12 @@
 #define DT_NODE_HAS_PROP(node, prop) CAT(HAS_, prop)
 #define HAS_led_capability 1
 #define HAS_pwms (HOST_PWM_TRANSPORT || HOST_KIND == 7) /* Pixel board's unrelated heater PWM. */
-#define HAS_led_channel_gpios HOST_GPIO_TRANSPORT
+#ifndef HOST_LEDDEV
+#define HOST_LEDDEV 0
+#endif
+#define HAS_led_device HOST_LEDDEV
+#define OR_led_device_channel(fallback) 1
+#define HAS_led_channel_gpios (HOST_GPIO_TRANSPORT && !HOST_LEDDEV)
 #define HAS_led_en_gpios HOST_GATE
 #define DT_STRING_TOKEN(node, prop) HOST_KIND_TOKEN
 #define DT_PROP(node, prop) CAT(VALUE_, prop)

@@ -29,6 +29,19 @@ parts += [function(system, name) for name in (
     "reboot_counter_read", "reboot_counter_write", "button_read", "button_read_filtered",
     "dock_read", "chg_read", "stby_read", "button_interrupt_handler")]
 parts += [function(status, "status_update")]
+# Supply the optional board configuration for extracted button paths.
+button_config = """
+#ifndef CONFIG_USER_BUTTON_REBOOT
+#define CONFIG_USER_BUTTON_REBOOT 1
+#endif
+#ifndef USER_SHUTDOWN_ENABLED
+#define USER_SHUTDOWN_ENABLED 0
+#endif
+#ifndef IS_ENABLED
+#define IS_ENABLED(value) (value)
+#endif
+""" + re.search(r"^#define BUTTON_HOLD_ACTION .*?$", system, re.MULTILINE).group() + "\n"
+parts.insert(0, button_config)
 with tempfile.TemporaryDirectory(prefix="tracker-system-core-") as directory:
     temp = Path(directory)
     (temp / "production.inc").write_text("\n\n".join(parts))
