@@ -18,7 +18,6 @@ source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.MULTILINE)
 
 esb_header = (ROOT / "src/connection/esb.h").read_text()
 wire_constants = re.findall(r"^#define ESB_(?:PING|PONG)_(?:TYPE|LEN)\b[^\n]*", esb_header, re.M)
-source = "\n".join(wire_constants) + "\n" + source
 
 source += r'''
 static void test_store(uint8_t child, const struct relay_rx_frame *f, uint8_t epoch, uint32_t expiry) {
@@ -481,7 +480,7 @@ source += (HERE / "repair_reference.inc").read_text()
 source += f"\nstatic uint8_t host_info_caps(void) {{ return {caps}; }}\n"
 with tempfile.TemporaryDirectory(prefix="relay-runtime-", dir="/tmp") as tmp:
     path = Path(tmp) / "runtime.c"
-    path.write_text(PREFIX + source + CASES)
+    path.write_text("\n".join(wire_constants) + "\n" + PREFIX + source + CASES)
     binary = Path(tmp) / "runtime"
     subprocess.run(shlex.split(os.environ.get("CC", "cc")) + [
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-Wno-unused-variable",
