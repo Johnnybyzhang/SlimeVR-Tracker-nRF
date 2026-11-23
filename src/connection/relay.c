@@ -602,7 +602,10 @@ static void relay_thread(void)
 		if (esb_link_wants_presence() && tdma_layout_get(&layout)) {
 			int64_t now = k_uptime_get();
 			if (now >= next_presence) {
-				next_presence = now + RELAY_PRESENCE_INTERVAL_MS;
+				/* Once two own exchanges are overdue, use the next
+				 * foreign slot. Several adjacent peers may be blocked. */
+				next_presence = now + (esb_link_state() == LINK_DEGRADED ?
+					RELAY_PRESENCE_INTERVAL_MS / layout.total_slots : RELAY_PRESENCE_INTERVAL_MS);
 				relay_presence_window(&layout);
 				continue;
 			}
