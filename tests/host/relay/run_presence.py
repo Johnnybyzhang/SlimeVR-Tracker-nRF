@@ -62,9 +62,9 @@ static bool control_seen, stream_profile;
 static uint8_t control_member_history, control_epoch;
 static unsigned esb_conn_state=1,channel_redirect_pending,tracker_id=2,channel_found;
 static unsigned presence_epoch=7,own_pong_length=23,receiver_heard_time,g_last_rx_raw_ticks=100000;
-static unsigned g_last_sync_timestamp,receiver_restart_detections,recovery_requests,filter_updates;
+static unsigned g_last_sync_timestamp,receiver_restart_detections,recovery_requests;
 static bool tdma_enabled=true;
-static struct {uint32_t offset,last_local_ticks;int32_t skew_ppb;bool initialized;int8_t receiver_lag;} sync_filter={.initialized=true};
+static struct {uint32_t offset,last_local_ticks;int32_t skew_ppb;bool initialized;int8_t receiver_lag;int16_t ack_delay16;} sync_filter={.initialized=true};
 static struct {unsigned pongs,sync_accepted,sync_rejected,layout_stale,layout_followed,relayed_confirms;} presence_stats;
 static int atomic_get(unsigned *p){return *p;}
 static void atomic_set(unsigned *p,unsigned n){*p=n;}
@@ -78,7 +78,7 @@ static uint32_t k_uptime_get(void){return now_ms;}
 static int64_t net_tick_difference(uint32_t a,uint32_t b){return (int32_t)(a-b);}
 static uint32_t relayed_confirm_time;
 struct esb_sync_sample{uint32_t local_ticks,offset;};
-static int esb_sync_filter_update(void *p,void *s){(void)p;(void)s;filter_updates++;return 0;}
+
 static uint8_t tdma_get_config_epoch(void){return presence_epoch;}
 static bool tdma_is_enabled(void){return tdma_enabled;}
 static bool tdma_update_config(uint8_t slot,uint8_t total,uint8_t width,uint8_t epoch){
@@ -185,13 +185,17 @@ int main(int argc,char **argv) {
   assert(presence_epoch==7);
  } else if(!strcmp(argv[1],"rejected")) {
   f=pong_with(100010,7,7,true);assert(esb_presence_frame(&f));
-  assert(!filter_updates && presence_epoch==7);
+  assert(!presence_stats.sync_accepted && presence_epoch==7);
   assert(!layout_confirm_seen && !staged.calls && !staged.clears); /* no clock agreement */
   f=pong(100010,8);assert(esb_presence_frame(&f));
-  assert(!filter_updates && layout_stale && presence_epoch==7);
+  assert(!presence_stats.sync_accepted && layout_stale && presence_epoch==7);
  } else if(!strcmp(argv[1],"valid")) {
-  f=pong(100000,8);assert(esb_presence_frame(&f));
-  assert(filter_updates==1 && !layout_stale && presence_epoch==8);
+  /* Own filtered time lags the receiver by 3 ticks. Radio ACK END
+   * lags it by 9. The measured peer sample agrees after conversion. */
+  sync_filter.receiver_lag=3;sync_filter.ack_delay16=9*16;
+  f=pong(99994,8);assert(esb_presence_frame(&f));
+  assert(sync_filter.offset==0 && sync_filter.last_local_ticks==100000);
+  assert(presence_stats.sync_accepted==1 && !layout_stale && presence_epoch==8);
   assert(layout_confirm_seen && layout_confirm_time==3000 && staged.clears==1);
  } else if(!strcmp(argv[1],"grant")) {
   f=pong_with(100000,7,3,false);assert(esb_presence_frame(&f)); /* lists 0,1 only */

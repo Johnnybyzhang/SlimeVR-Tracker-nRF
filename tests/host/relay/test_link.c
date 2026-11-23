@@ -20,6 +20,9 @@ int main(void)
 	i = in(900, 900, LINK_AGE_NEVER);
 	CHECK(link_classify(&i) == LINK_HEALTHY && link_delivering(&i) && !link_wants_presence(&i));
 
+	i = in(1100, 1100, LINK_AGE_NEVER);
+	CHECK(link_classify(&i) == LINK_HEALTHY && link_wants_presence(&i));
+
 	/* Legacy rule searched after 3 lost PINGs / 4.5 s: now one fade of any
 	 * length is held while the receiver is still heard. */
 	i = in(4600, 300, LINK_AGE_NEVER);

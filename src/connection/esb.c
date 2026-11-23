@@ -2751,7 +2751,11 @@ bool esb_presence_frame(const struct relay_rx_frame *frame)
 			irq_unlock(key);
 			return true;
 		}
-		uint32_t offset = t2 - t4_net;
+		/* Map the peer ACK END onto our current profile-0 reference.
+		 * receiver_lag includes the last own filter residual as well as
+		 * the physical ACK delay. Promotion adds that same lag back. */
+		int32_t ack_delay = (sync_filter.ack_delay16 + 8) >> 4;
+		uint32_t offset = t2 - t4_net + (uint32_t)(ack_delay - sync_filter.receiver_lag);
 		uint32_t elapsed = t4_net - sync_filter.last_local_ticks;
 		uint32_t predicted = sync_filter.offset
 			+ (uint32_t)((int64_t)sync_filter.skew_ppb * elapsed / 1000000000LL);
@@ -2762,8 +2766,11 @@ bool esb_presence_frame(const struct relay_rx_frame *frame)
 			(int)sync_filter.receiver_lag, tuple_epoch, has_trailer && trailer.pending);
 #endif
 		if (!backward && link_passive_sample_acceptable(innovation)) {
-			struct esb_sync_sample sample = {.local_ticks = t4_net, .offset = offset};
-			(void)esb_sync_filter_update(&sync_filter, &sample);
+			/* A 300 ms interval can carry less than one tick of drift.
+			 * Re-anchor at this bounded observation rather than repeatedly
+			 * rounding those fractional intervals out of the filter. */
+			sync_filter.offset = offset;
+			sync_filter.last_local_ticks = t4_net;
 			g_last_rx_raw_ticks = t2;
 			g_last_sync_timestamp = k_uptime_get();
 			presence_stats.sync_accepted++;

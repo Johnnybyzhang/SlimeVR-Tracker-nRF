@@ -73,7 +73,9 @@ static inline bool link_delivering(const struct link_inputs *in)
  * actually failed, and is pointless once the tracker is searching anyway. */
 static inline bool link_wants_presence(const struct link_inputs *in)
 {
-	return link_classify(in) == LINK_DEGRADED;
+	/* One missing native PONG is enough to start listening. A second
+	 * missed period leaves little time to catch a staged announcement. */
+	return in->own_pong_age_ms >= 1100U && link_classify(in) != LINK_LOST;
 }
 
 /* Overheard PONGs feed the clock filter only when they agree with the current
