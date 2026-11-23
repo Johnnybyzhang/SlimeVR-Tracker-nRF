@@ -2748,36 +2748,34 @@ bool esb_presence_frame(const struct relay_rx_frame *frame, const uint32_t *ping
 			irq_unlock(key);
 			return true;
 		}
-		/* T2 stamps the received PING. Compare the same air event on
-		 * both clocks, independent of this peer's ACK length and delay.
-		 * Profile 0 still uses the reference measured by our own PONG. */
-		if (!ping_end) {
-			irq_unlock(key);
-			return true;
-		}
-		uint32_t local = (uint32_t)net_ticks_from_kernel64(kernel_ticks_extend32(*ping_end));
-		uint32_t offset = t2 - local - (uint32_t)(int32_t)sync_filter.receiver_lag;
-		uint32_t elapsed = local - sync_filter.last_local_ticks;
-		uint32_t predicted = sync_filter.offset
-			+ (uint32_t)((int64_t)sync_filter.skew_ppb * elapsed / 1000000000LL);
-		int64_t innovation = net_tick_difference(offset, predicted);
+		if (ping_end) {
+			/* T2 stamps the received PING. Compare the same air event on
+			 * both clocks, independent of this peer's ACK length and delay.
+			 * Profile 0 still uses the reference measured by our own PONG. */
+			uint32_t local = (uint32_t)net_ticks_from_kernel64(kernel_ticks_extend32(*ping_end));
+			uint32_t offset = t2 - local - (uint32_t)(int32_t)sync_filter.receiver_lag;
+			uint32_t elapsed = local - sync_filter.last_local_ticks;
+			uint32_t predicted = sync_filter.offset
+				+ (uint32_t)((int64_t)sync_filter.skew_ppb * elapsed / 1000000000LL);
+			int64_t innovation = net_tick_difference(offset, predicted);
 #ifdef CONFIG_RELAY_ACQUISITION_TRACE
-		LOG_INF("acq peer=%u t2=%u local=%u error=%d skew=%d lag=%d epoch=%u pending=%u",
-			data[1], t2, local, (int32_t)innovation, sync_filter.skew_ppb,
-			(int)sync_filter.receiver_lag, tuple_epoch, has_trailer && trailer.pending);
+			LOG_INF("acq peer=%u t2=%u local=%u error=%d skew=%d lag=%d epoch=%u pending=%u",
+				data[1], t2, local, (int32_t)innovation, sync_filter.skew_ppb,
+				(int)sync_filter.receiver_lag, tuple_epoch, has_trailer && trailer.pending);
 #endif
-		if (!backward && link_passive_sample_acceptable(innovation)) {
-			/* A 300 ms interval can carry less than one tick of drift.
-			 * Re-anchor at this bounded observation rather than repeatedly
-			 * rounding those fractional intervals out of the filter. */
-			sync_filter.offset = offset;
-			sync_filter.last_local_ticks = local;
-			g_last_rx_raw_ticks = t2;
-			g_last_sync_timestamp = k_uptime_get();
-			presence_stats.sync_accepted++;
-			passive_sync_valid = true;
-		} else {
-			presence_stats.sync_rejected++;
+			if (link_passive_sample_acceptable(innovation)) {
+				/* A 300 ms interval can carry less than one tick of drift.
+				 * Re-anchor at this bounded observation rather than repeatedly
+				 * rounding those fractional intervals out of the filter. */
+				sync_filter.offset = offset;
+				sync_filter.last_local_ticks = local;
+				g_last_rx_raw_ticks = t2;
+				g_last_sync_timestamp = k_uptime_get();
+				presence_stats.sync_accepted++;
+				passive_sync_valid = true;
+			} else {
+				presence_stats.sync_rejected++;
+			}
 		}
 	}
 	/* An overheard NORMAL PONG with clock agreement confirms our layout if it

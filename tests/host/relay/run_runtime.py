@@ -16,6 +16,10 @@ ROOT = Path(os.environ.get("SOURCE_ROOT", HERE.parents[2]))
 source = (ROOT / "src/connection/relay.c").read_text()
 source = re.sub(r'^#include[^\n]*\n', '', source, flags=re.MULTILINE)
 
+esb_header = (ROOT / "src/connection/esb.h").read_text()
+wire_constants = re.findall(r"^#define ESB_(?:PING|PONG)_(?:TYPE|LEN)\b[^\n]*", esb_header, re.M)
+source = "\n".join(wire_constants) + "\n" + source
+
 source += r'''
 static void test_store(uint8_t child, const struct relay_rx_frame *f, uint8_t epoch, uint32_t expiry) {
  struct tdma_layout l; if(!tdma_layout_get(&l))return;
@@ -104,8 +108,16 @@ bool relay_radio_busy(void) { return false; }
 bool relay_radio_take(struct relay_rx_frame *f) {
     *f = incoming; return capture_available;
 }
-bool relay_radio_poll(struct relay_rx_frame *f) { *f = incoming; return true; }
-static bool esb_presence_frame(const struct relay_rx_frame *f, const uint32_t *ping_end) { (void)f; (void)ping_end; return true; }
+static unsigned poll_count;
+bool relay_radio_poll(struct relay_rx_frame *f) {
+    *f = incoming;
+    f->length = poll_count ? ESB_PONG_LEN : ESB_PING_LEN;
+    f->data[0] = poll_count ? ESB_PONG_TYPE : ESB_PING_TYPE;
+    f->end_kernel_ticks = now_ticks + poll_count * 9U;
+    poll_count++;
+    return true;
+}
+static bool esb_presence_frame(const struct relay_rx_frame *f, const uint32_t *ping_end) { assert(ping_end && f->end_kernel_ticks - *ping_end == 9); return true; }
 bool relay_radio_stop(void) { assert(radio_owned); return true; }
 bool relay_radio_addressed(void) { return false; }
 bool relay_radio_ended(void) { return false; }
