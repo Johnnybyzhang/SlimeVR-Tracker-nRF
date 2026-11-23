@@ -512,20 +512,43 @@ static void relay_presence_window(const struct tdma_layout *layout)
 		relay_clock(false);
 		return;
 	}
+#ifdef CONFIG_RELAY_ACQUISITION_TRACE
+	uint32_t rx_start = k_cycle_get_32();
+	uint32_t ping_end = 0;
+	uint32_t peer_delay = 0;
+	uint8_t peer = 0xff, counter = 0;
+#endif
 	uint32_t end = best_start + best_length + net_ticks_of_us(RELAY_RX_TAIL_US);
 	struct relay_rx_frame frame;
 	bool pong = false;
 	while (!pong && tdma_network_now(&now) && (int32_t)(end - now) > 0) {
 		if (relay_radio_poll(&frame)) {
+		#ifdef CONFIG_RELAY_ACQUISITION_TRACE
+			if (frame.length == ESB_PING_LEN && frame.data[0] == ESB_PING_TYPE) {
+				ping_end = frame.end_kernel_ticks;
+				peer = frame.data[1];
+				counter = frame.data[2];
+			} else if (frame.length >= ESB_PONG_LEN && frame.data[0] == ESB_PONG_TYPE
+				   && frame.data[1] == peer && frame.data[2] == counter) {
+				peer_delay = frame.end_kernel_ticks - ping_end;
+			}
+#endif
 			pong = esb_presence_frame(&frame);
 			stats.presence_rx += pong;
 		} else {
 			k_busy_wait(5);
 		}
 	}
+#ifdef CONFIG_RELAY_ACQUISITION_TRACE
+	uint32_t rx_end = k_cycle_get_32();
+#endif
 	relay_radio_stop();
 	esb_raw_rx_end();
 	relay_clock(false);
+#ifdef CONFIG_RELAY_ACQUISITION_TRACE
+	LOG_INF("acq listen start=%u epoch=%u rx_us=%u peer_delay=%u",
+		best_start, layout->epoch, k_cyc_to_us_floor32(rx_end - rx_start), peer_delay);
+#endif
 }
 
 static void relay_thread(void)

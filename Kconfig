@@ -873,6 +873,11 @@ config RELAY_CYCLE_DIAGNOSTICS
     help
         Measure relay processing with DWT. Production omits these probes.
 
+config RELAY_ACQUISITION_TRACE
+    bool "Log passive layout acquisition timestamps"
+    depends on CONNECTION_RELAY
+    default n
+
 config RELAY_PRODUCER_DIAGNOSTICS
     bool "Relay producer generation and age diagnostics"
     default n

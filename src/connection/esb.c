@@ -2105,6 +2105,11 @@ static void esb_receive_pong(const struct esb_payload *payload)
 				int64_t lag = net_tick_difference(ping_rx_ticks - tx_end, sync_filter.offset);
 				sync_filter.receiver_lag = lag == (int8_t)lag ? (int8_t)lag : 0;
 				int32_t ack16 = (int32_t)(t4_net_ticks - tx_end) * 16;
+#ifdef CONFIG_RELAY_ACQUISITION_TRACE
+				LOG_INF("acq own t2=%u epoch=%u innovation=%d skew=%d delay=%d lag=%d",
+					ping_rx_ticks, payload->data[11], (int32_t)innovation,
+					sync_filter.skew_ppb, ack16 / 16, (int)sync_filter.receiver_lag);
+#endif
 				if (ack16 > 0 && ack16 < 32 * 16) {
 					int32_t old16 = sync_filter.ack_delay16;
 					sync_filter.ack_delay16 = (int16_t)(old16 ? old16 + (ack16 - old16) / 4 : ack16);
@@ -2751,6 +2756,11 @@ bool esb_presence_frame(const struct relay_rx_frame *frame)
 		uint32_t predicted = sync_filter.offset
 			+ (uint32_t)((int64_t)sync_filter.skew_ppb * elapsed / 1000000000LL);
 		int64_t innovation = net_tick_difference(offset, predicted);
+#ifdef CONFIG_RELAY_ACQUISITION_TRACE
+		LOG_INF("acq peer=%u t2=%u local=%u error=%d skew=%d lag=%d epoch=%u pending=%u",
+			data[1], t2, t4_net, (int32_t)innovation, sync_filter.skew_ppb,
+			(int)sync_filter.receiver_lag, tuple_epoch, has_trailer && trailer.pending);
+#endif
 		if (!backward && link_passive_sample_acceptable(innovation)) {
 			struct esb_sync_sample sample = {.local_ticks = t4_net, .offset = offset};
 			(void)esb_sync_filter_update(&sync_filter, &sample);
