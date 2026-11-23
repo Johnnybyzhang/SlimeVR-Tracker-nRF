@@ -143,7 +143,7 @@ static inline bool esb_relay_control_window(uint32_t start)
 #endif
 bool esb_relay_control_receive(const struct relay_rx_frame *frame);
 /* Overheard PONG from a presence window; true for any CRC-valid PONG. */
-bool esb_presence_frame(const struct relay_rx_frame *frame);
+bool esb_presence_frame(const struct relay_rx_frame *frame, const uint32_t *ping_end);
 void esb_print_link_status(void);
 /* Relay-only bundle in the forwarding slot (or own slot without one). */
 int esb_write_relay(void);

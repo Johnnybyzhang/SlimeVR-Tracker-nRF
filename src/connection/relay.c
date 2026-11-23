@@ -514,26 +514,29 @@ static void relay_presence_window(const struct tdma_layout *layout)
 	}
 #ifdef CONFIG_RELAY_ACQUISITION_TRACE
 	uint32_t rx_start = k_cycle_get_32();
-	uint32_t ping_end = 0;
 	uint32_t peer_delay = 0;
-	uint8_t peer = 0xff, counter = 0;
 #endif
+	uint32_t ping_end = 0;
+	uint8_t peer = 0xff, counter = 0;
 	uint32_t end = best_start + best_length + net_ticks_of_us(RELAY_RX_TAIL_US);
 	struct relay_rx_frame frame;
 	bool pong = false;
 	while (!pong && tdma_network_now(&now) && (int32_t)(end - now) > 0) {
 		if (relay_radio_poll(&frame)) {
-		#ifdef CONFIG_RELAY_ACQUISITION_TRACE
-			if (frame.length == ESB_PING_LEN && frame.data[0] == ESB_PING_TYPE) {
+		/* Match the peer's successful PING attempt to this PONG.
+			 * Both radio END observations passed the CRC and poll-time gates. */
+			if (frame.length == ESB_PING_LEN && frame.data[0] == ESB_PING_TYPE
+			    && frame.data[1] < TDMA_MAX_TRACKERS && frame.pipe == 1U + frame.data[1] % 7U) {
 				ping_end = frame.end_kernel_ticks;
 				peer = frame.data[1];
 				counter = frame.data[2];
-			} else if (frame.length >= ESB_PONG_LEN && frame.data[0] == ESB_PONG_TYPE
-				   && frame.data[1] == peer && frame.data[2] == counter) {
-				peer_delay = frame.end_kernel_ticks - ping_end;
-			}
+			} else if (frame.length >= ESB_PONG_LEN && frame.data[0] == ESB_PONG_TYPE) {
+				bool paired = frame.data[1] == peer && frame.data[2] == counter;
+#ifdef CONFIG_RELAY_ACQUISITION_TRACE
+				peer_delay = paired ? frame.end_kernel_ticks - ping_end : 0;
 #endif
-			pong = esb_presence_frame(&frame);
+				pong = esb_presence_frame(&frame, paired ? &ping_end : NULL);
+			}
 			stats.presence_rx += pong;
 		} else {
 			k_busy_wait(5);

@@ -2696,7 +2696,7 @@ bool esb_relay_control_window(uint32_t start)
 
 #endif
 
-bool esb_presence_frame(const struct relay_rx_frame *frame)
+bool esb_presence_frame(const struct relay_rx_frame *frame, const uint32_t *ping_end)
 {
 	const uint8_t *data = frame->data;
 	if (data[0] != ESB_PONG_TYPE
@@ -2710,9 +2710,6 @@ bool esb_presence_frame(const struct relay_rx_frame *frame)
 		&& relay_trailer_decode_len(&data[ESB_PONG_LEN], (uint8_t)(frame->length - ESB_PONG_LEN), &trailer);
 	uint8_t flag = data[7];
 	uint32_t t2 = sys_get_be32(&data[3]);
-	int32_t length_adjust_us = ((int32_t)own_pong_length - (int32_t)frame->length) * 4;
-	uint32_t t4_net = (uint32_t)net_ticks_from_kernel64(kernel_ticks_extend32(frame->end_kernel_ticks));
-	t4_net += (uint32_t)((length_adjust_us * 32768 + (length_adjust_us >= 0 ? 500000 : -500000)) / 1000000);
 	uint32_t now = k_uptime_get_32();
 	bool follow = false;
 	bool passive_sync_valid = false;
@@ -2751,18 +2748,22 @@ bool esb_presence_frame(const struct relay_rx_frame *frame)
 			irq_unlock(key);
 			return true;
 		}
-		/* Map the peer ACK END onto our current profile-0 reference.
-		 * receiver_lag includes the last own filter residual as well as
-		 * the physical ACK delay. Promotion adds that same lag back. */
-		int32_t ack_delay = (sync_filter.ack_delay16 + 8) >> 4;
-		uint32_t offset = t2 - t4_net + (uint32_t)(ack_delay - sync_filter.receiver_lag);
-		uint32_t elapsed = t4_net - sync_filter.last_local_ticks;
+		/* T2 stamps the received PING. Compare the same air event on
+		 * both clocks, independent of this peer's ACK length and delay.
+		 * Profile 0 still uses the reference measured by our own PONG. */
+		if (!ping_end) {
+			irq_unlock(key);
+			return true;
+		}
+		uint32_t local = (uint32_t)net_ticks_from_kernel64(kernel_ticks_extend32(*ping_end));
+		uint32_t offset = t2 - local - (uint32_t)(int32_t)sync_filter.receiver_lag;
+		uint32_t elapsed = local - sync_filter.last_local_ticks;
 		uint32_t predicted = sync_filter.offset
 			+ (uint32_t)((int64_t)sync_filter.skew_ppb * elapsed / 1000000000LL);
 		int64_t innovation = net_tick_difference(offset, predicted);
 #ifdef CONFIG_RELAY_ACQUISITION_TRACE
 		LOG_INF("acq peer=%u t2=%u local=%u error=%d skew=%d lag=%d epoch=%u pending=%u",
-			data[1], t2, t4_net, (int32_t)innovation, sync_filter.skew_ppb,
+			data[1], t2, local, (int32_t)innovation, sync_filter.skew_ppb,
 			(int)sync_filter.receiver_lag, tuple_epoch, has_trailer && trailer.pending);
 #endif
 		if (!backward && link_passive_sample_acceptable(innovation)) {
@@ -2770,7 +2771,7 @@ bool esb_presence_frame(const struct relay_rx_frame *frame)
 			 * Re-anchor at this bounded observation rather than repeatedly
 			 * rounding those fractional intervals out of the filter. */
 			sync_filter.offset = offset;
-			sync_filter.last_local_ticks = t4_net;
+			sync_filter.last_local_ticks = local;
 			g_last_rx_raw_ticks = t2;
 			g_last_sync_timestamp = k_uptime_get();
 			presence_stats.sync_accepted++;

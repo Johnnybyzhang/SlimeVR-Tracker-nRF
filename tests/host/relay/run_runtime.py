@@ -105,7 +105,7 @@ bool relay_radio_take(struct relay_rx_frame *f) {
     *f = incoming; return capture_available;
 }
 bool relay_radio_poll(struct relay_rx_frame *f) { *f = incoming; return true; }
-static bool esb_presence_frame(const struct relay_rx_frame *f) { (void)f; return true; }
+static bool esb_presence_frame(const struct relay_rx_frame *f, const uint32_t *ping_end) { (void)f; (void)ping_end; return true; }
 bool relay_radio_stop(void) { assert(radio_owned); return true; }
 bool relay_radio_addressed(void) { return false; }
 bool relay_radio_ended(void) { return false; }

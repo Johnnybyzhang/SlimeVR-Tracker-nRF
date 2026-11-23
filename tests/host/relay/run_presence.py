@@ -177,45 +177,48 @@ static bool receive_history_control(const struct relay_control *c) {
 }
 int main(int argc,char **argv) {
  assert(argc==2);
+ uint32_t ping_end = 100000;
  struct relay_rx_frame f;
  if(!strcmp(argv[1],"reboot")) {
-  f=pong(1000,8);assert(esb_presence_frame(&f));
+  f=pong(1000,8);assert(esb_presence_frame(&f, &ping_end));
   assert(channel_wait_normal && !server_time_synced && !tdma_enabled);
   assert(!channel_confirmed && recovery_requests==1 && receiver_restart_detections==1);
   assert(presence_epoch==7);
  } else if(!strcmp(argv[1],"rejected")) {
-  f=pong_with(100010,7,7,true);assert(esb_presence_frame(&f));
+  f=pong_with(100010,7,7,true);assert(esb_presence_frame(&f, &ping_end));
   assert(!presence_stats.sync_accepted && presence_epoch==7);
   assert(!layout_confirm_seen && !staged.calls && !staged.clears); /* no clock agreement */
-  f=pong(100010,8);assert(esb_presence_frame(&f));
+  f=pong(100010,8);assert(esb_presence_frame(&f, &ping_end));
   assert(!presence_stats.sync_accepted && layout_stale && presence_epoch==7);
  } else if(!strcmp(argv[1],"valid")) {
   /* Own filtered time lags the receiver by 3 ticks. Radio ACK END
    * lags it by 9. The measured peer sample agrees after conversion. */
   sync_filter.receiver_lag=3;sync_filter.ack_delay16=9*16;
-  f=pong(99994,8);assert(esb_presence_frame(&f));
+  f=pong(100003,8);f.end_kernel_ticks = ping_end+21;
+  assert(esb_presence_frame(&f, NULL) && !presence_stats.sync_accepted);
+  assert(esb_presence_frame(&f, &ping_end));
   assert(sync_filter.offset==0 && sync_filter.last_local_ticks==100000);
   assert(presence_stats.sync_accepted==1 && !layout_stale && presence_epoch==8);
   assert(layout_confirm_seen && layout_confirm_time==3000 && staged.clears==1);
  } else if(!strcmp(argv[1],"grant")) {
-  f=pong_with(100000,7,3,false);assert(esb_presence_frame(&f)); /* lists 0,1 only */
+  f=pong_with(100000,7,3,false);assert(esb_presence_frame(&f, &ping_end)); /* lists 0,1 only */
   assert(!layout_confirm_seen);
   /* Epochs are unordered: a different epoch listing us is followed and confirms. */
-  f=pong_with(100000,6,7,false);assert(esb_presence_frame(&f));
+  f=pong_with(100000,6,7,false);assert(esb_presence_frame(&f, &ping_end));
   assert(layout_confirm_seen && presence_epoch==6);layout_confirm_seen=false;
-  f=pong_with(100000,6,7,false);assert(esb_presence_frame(&f));
+  f=pong_with(100000,6,7,false);assert(esb_presence_frame(&f, &ping_end));
   assert(layout_confirm_seen && layout_confirm_time==3000);
  } else if(!strcmp(argv[1],"pending")) {
-  f=pong_with(100000,7,7,true);assert(esb_presence_frame(&f));
+  f=pong_with(100000,7,7,true);assert(esb_presence_frame(&f, &ping_end));
   assert(staged.calls==1 && staged.slot==2 && staged.total==4 && staged.width==16 && staged.epoch==9);
   assert(staged.activation==100000+100*RELAY_ACTIVATION_UNIT_TICKS);
   assert(layout_confirm_seen && presence_epoch==7);
   layout_confirm_seen=false;f=pong_with(100000,7,7,true);
   f.data[13+12]^=1; /* corrupt a pending field: the trailer CRC rejects it all */
-  assert(esb_presence_frame(&f));assert(staged.calls==1 && !layout_confirm_seen);
+  assert(esb_presence_frame(&f, &ping_end));assert(staged.calls==1 && !layout_confirm_seen);
  } else if(!strcmp(argv[1],"invalid-tuple")) {
   f=pong(100000,8);f.data[10]=0;f.data[12]=relay_crc8(7,f.data,12);
-  assert(esb_presence_frame(&f));assert(layout_stale && presence_epoch==7);
+  assert(esb_presence_frame(&f, &ping_end));assert(layout_stale && presence_epoch==7);
  } else if(!strcmp(argv[1],"relay-recovery")) {
   esb_conn_state=ESB_ST_RECOVERING;status_error=true;ping_failures=300;
   connection_error_start_time=100;shutdown_requested=true;
@@ -374,7 +377,7 @@ int main(int argc,char **argv) {
   reset_history_case();c=history_control(10,100000,true);c.missing[0]=3;
   assert(receive_history_control(&c) && relayed_confirm_seen);
   f=pong_with(100000,8,3,false); /* a new layout does not assign this tracker */
-  assert(esb_presence_frame(&f) && layout_stale && !relayed_confirm_seen);
+  assert(esb_presence_frame(&f, &ping_end) && layout_stale && !relayed_confirm_seen);
   layout_stale=false;c.frame++;c.preamble_ticks+=273;c.missing[0]=7;c.missing[1]=3;now_ms++;
   assert(receive_history_control(&c) && !relayed_confirm_seen);
 
