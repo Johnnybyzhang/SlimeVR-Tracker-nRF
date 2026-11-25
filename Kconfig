@@ -816,21 +816,21 @@ config CLOCK_CONTROL_NRF_K32SRC_RC_CALIBRATION
     default n
 
 config CONNECTION_RELAY
-    bool "Receiver-coordinated peer relay and presence supervision"
+    bool "Receiver-coordinated peer relay"
     default y
     depends on CONNECTION_TDMA
     depends on ESB_MAX_PAYLOAD_LENGTH >= 72
-    # sdk-nrf without the ESB RX metadata option: relay is compiled out.
     depends on ESB_HAS_RX_METADATA
     select ESB_RX_METADATA
     help
-        Advertise relay capability, keep slot and time sync from overheard
-        receiver PONGs while the own uplink fails (instead of channel
-        searching), and act as a relay head when the receiver assigns
-        children: listen in their TDMA slots and forward their pose frames.
-        Normal direct TDMA has no helper watch overhead. On demand, control
-        feedback assigns watch windows and grants bounded cached repairs.
-        Requires a 72-byte ESB payload buffer.
+        Receiver-coordinated peer relay. On by default whenever TDMA is on
+        and the SDK provides ESB RX metadata; the receiver's runtime relay
+        mode decides when relay engages.
+        Normal direct TDMA has no helper overhead. When the receiver engages
+        relay, its control frames assign watch windows; the tracker caches
+        overheard poses and resends them only in repair slots granted by
+        the current control frame. Overheard receiver PONGs also keep slot
+        and time sync while the own uplink fails.
 
 menu "TDMA diagnostics"
 
