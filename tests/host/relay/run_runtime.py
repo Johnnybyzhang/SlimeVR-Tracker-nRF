@@ -478,6 +478,10 @@ int main(int argc,char **argv) {
 caps = "relay_info_caps()" if "uint8_t relay_info_caps(" in source else "RELAY_INFO_CAPS"
 source += (HERE / "repair_reference.inc").read_text()
 source += f"\nstatic uint8_t host_info_caps(void) {{ return {caps}; }}\n"
+import sys
+SELECTORS = {"accounting", "d10", "learned", "maintenance", "fast", "clock"}
+if len(sys.argv) > 2 or (len(sys.argv) == 2 and sys.argv[1] not in SELECTORS):
+    sys.exit(f"usage: {sys.argv[0]} [{'|'.join(sorted(SELECTORS))}]")
 with tempfile.TemporaryDirectory(prefix="relay-runtime-", dir="/tmp") as tmp:
     path = Path(tmp) / "runtime.c"
     path.write_text("\n".join(wire_constants) + "\n" + PREFIX + source + CASES)
@@ -486,5 +490,4 @@ with tempfile.TemporaryDirectory(prefix="relay-runtime-", dir="/tmp") as tmp:
         "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-Wno-unused-variable",
         "-g", "-O1", "-fsanitize=address,undefined", "-I", str(ROOT / "src/connection"),
         str(path), "-o", str(binary)], check=True)
-    import sys
     subprocess.run([str(binary), *sys.argv[1:]], check=True)

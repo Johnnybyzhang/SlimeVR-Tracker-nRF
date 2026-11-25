@@ -513,6 +513,12 @@ uint8_t tdma_profile_get(void)
 		? RELAY_PROFILE_120HZ : 0;
 }
 
+bool tdma_profile_staged(void)
+{
+	uint32_t staged = (uint32_t)atomic_get(&tdma_staged_pack);
+	return (staged & TDMA_STAGED_BIT) && (staged & TDMA_PROFILE_BIT);
+}
+
 void tdma_stream_anchor(uint32_t preamble, uint32_t frame)
 {
 	tdma_anchor_frame = frame;

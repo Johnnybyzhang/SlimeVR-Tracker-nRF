@@ -66,7 +66,9 @@ int main(void)
 		}
 		uint32_t c = link_search_step_candidate(step, count);
 		CHECK(c >= 1 && c < count);
-		visited[c] = 1;
+		if (c >= 1 && c < count) {
+			visited[c] = 1;
+		}
 	}
 	for (uint32_t c = 1; c < count; c++) {
 		CHECK(visited[c]);

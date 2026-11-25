@@ -150,6 +150,8 @@ static int connection_set_data_collection_batch(bool enabled, uint16_t rate)
 static void test_mode_set(bool active) { test_mode_changes++; }
 static unsigned char private_profile;
 static unsigned char tdma_profile_get(void) { return private_profile; }
+static bool private_staged;
+static bool tdma_profile_staged(void) { return private_staged; }
 #ifndef HOST_CAPABILITY_MATRIX
 static unsigned data_collect_calls;
 static void connection_set_data_collection(bool enable) { (void)enable; data_collect_calls++; }
@@ -564,7 +566,14 @@ int main(void)
     private_profile = 0; now_ms += 100; feeds = 0;
     if (setjmp(thread_stop) == 0) esb_thread();
     assert(!data_collect_calls && test_mode_changes == 1);
-    puts("commands: collection start refused in the relay profile is final");
+    /* A staged private layout refuses too: collection must not straddle activation. */
+    receive_control(ESB_PONG_FLAG_NORMAL);
+    receive_control(ESB_PONG_FLAG_DATA_COLLECT_ON);
+    now_ms += 100; feeds = 0; private_staged = true;
+    if (setjmp(thread_stop) == 0) esb_thread();
+    assert(acked_remote_command == ESB_PONG_FLAG_DATA_COLLECT_ON && !data_collect_calls);
+    private_staged = false;
+    puts("commands: collection start refused in (or staged into) the relay profile is final");
 #endif
 
     /* A newer PONG may replace a refused shutdown during its next LED delay. */

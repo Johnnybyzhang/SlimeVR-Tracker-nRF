@@ -72,6 +72,8 @@ static unsigned clock_starts;
 static int clocks_start(void){assert(tx_clock_users);clock_starts++;return 0;}
 static bool tdma_wait_for_repair_slot(uint8_t s,uint8_t n){(void)s;(void)n;assert(!profile || (repair_built && waited && n==22));return granted;}
 static bool tdma_wait_for_slot(uint8_t n){(void)n;return true;}
+static uint32_t admit_now=194;
+static bool tdma_network_now(uint32_t *t){*t=admit_now;return true;}
 static bool esb_is_idle(void){return true;}
 static bool tdma_repair_tx_valid(uint8_t s,uint8_t n){(void)s;(void)n;assert(irq_depth);return final_valid;}
 static bool tdma_slot_tx_valid(uint8_t n){(void)n;assert(irq_depth);return final_valid;}
@@ -119,6 +121,10 @@ int main(int argc,char **argv){
  }else if(!strcmp(argv[1],"repair-ungranted")){
   profile=true;granted=false;assert(esb_write_relay()==-EAGAIN);
   assert(!queued && !started);
+ }else if(!strcmp(argv[1],"repair-next-frame")){
+  /* Admission resumed in the same R slot of a later frame: not this grant. */
+  profile=true;admit_now=194+RELAY_SLOT_TICKS;assert(esb_write_relay()==-EAGAIN);
+  assert(!queued && !started);
  }else if(!strcmp(argv[1],"air")){
   raw_rx_active=true;assert(esb_air_claim()==-EBUSY);
   assert(!writer_air && !busy_delays);
@@ -142,5 +148,5 @@ with tempfile.TemporaryDirectory(prefix="relay-submit-",dir="/tmp") as tmp:
         "-std=c11","-Wall","-Wextra","-Werror","-Wno-unused-function",
         "-g","-O1","-fsanitize=address,undefined","-I",str(ROOT/"src/connection"),
         str(path),"-o",str(binary)],check=True)
-    for case in sys.argv[1:] or ("source-valid","source-expired","source-grant-expired","source-busy","source-full","maintenance","maintenance-late","repair","repair-warm","peer-report","repair-ungranted","air","expired","collection","no-grant","valid"):
+    for case in sys.argv[1:] or ("source-valid","source-expired","source-grant-expired","source-busy","source-full","maintenance","maintenance-late","repair","repair-warm","peer-report","repair-ungranted","repair-next-frame","air","expired","collection","no-grant","valid"):
         subprocess.run([str(binary),case],check=True)

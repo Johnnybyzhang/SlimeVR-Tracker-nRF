@@ -770,7 +770,8 @@ static void esb_remote_cmd_tcal_boot_off(void)
  * The refusal (-EBUSY) is final for the request, like a batch rate refusal. */
 static int esb_remote_cmd_data_collect_refuse_private(const char *name)
 {
-	if (!tdma_profile_get()) {
+	/* A staged private layout counts too: collection must not straddle its activation. */
+	if (!tdma_profile_get() && !tdma_profile_staged()) {
 		return 0;
 	}
 	LOG_WRN("Remote command: %s refused in relay profile; turn relay off first", name);
@@ -2361,15 +2362,10 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 		return false;
 	}
 	unsigned key = irq_lock();
-	if (control_seen && (control.session != control_session
-	    || (int32_t)(control.frame - control_frame) <= 0)) {
-		if (control.session != control_session) {
-			control_seen = false;
-			control_member_history = 0;
-			relayed_confirm_seen = false;
-			tdma_set_enabled(false);
-			layout_confirm_seen = false;
-		}
+	/* A new session retires the old lease only after its frame passes the
+	 * timing check below; an unvalidated frame cannot revoke the grant. */
+	bool new_session = control_seen && control.session != control_session;
+	if (control_seen && !new_session && (int32_t)(control.frame - control_frame) <= 0) {
 		control_reject[4]++;
 		control_repeat_reject[4] += repeat;
 		irq_unlock(key);
@@ -2393,6 +2389,17 @@ bool esb_relay_control_receive(const struct relay_rx_frame *frame)
 	if (!sync_filter.initialized || !link_passive_sample_acceptable(net_tick_difference(offset, predicted))) {
 		control_reject[5]++;
 		control_repeat_reject[5] += repeat;
+		irq_unlock(key);
+		return false;
+	}
+	if (new_session) {
+		control_seen = false;
+		control_member_history = 0;
+		relayed_confirm_seen = false;
+		tdma_set_enabled(false);
+		layout_confirm_seen = false;
+		control_reject[4]++;
+		control_repeat_reject[4] += repeat;
 		irq_unlock(key);
 		return false;
 	}
@@ -2567,7 +2574,9 @@ bool esb_relay_control_window(uint32_t start)
 	}
 	irq_unlock(key);
 	unsigned open_lag = 0;
-	if (tdma_network_now(&now) && (int32_t)(now - start) > 0) {
+	/* A failed sample leaves now unset; widen as if the direct grant were unknown. */
+	bool now_valid = tdma_network_now(&now);
+	if (now_valid && (int32_t)(now - start) > 0) {
 		control_open_late++;
 		control_open_lag_max = MAX(control_open_lag_max, now - start);
 		open_lag = MIN(now - start, 15U);
@@ -2598,7 +2607,7 @@ bool esb_relay_control_window(uint32_t start)
 	/* After three missed control frames the next R is unknown. Listen continuously for
 	 * one maximum-length frame, with poses still fenced by the anchor.
 	 * This also acquires the cap when joining a private runtime layout. */
-	if (!relay_direct_anchor.valid || !relay_runtime_direct_granted(&relay_direct_anchor, now)) {
+	if (!now_valid || !relay_direct_anchor.valid || !relay_runtime_direct_granted(&relay_direct_anchor, now)) {
 		uint32_t longest = (RELAY_DIRECT_SLOTS + 1U + RELAY_REPAIR_MAX
 			+ relay_control_repeat_slots(relay_geometry_current()->control_repeat_mode)) * RELAY_SLOT_TICKS
 			+ RELAY_CONTROL_ARM_GUARD_TICKS * (1U + (relay_geometry_current()->control_repeat_mode != 0U));
@@ -3499,8 +3508,13 @@ int esb_user_set_enabled(bool enabled)
 		err = esb_reinitialize();
 	} else {
 		esb_deinitialize();
-		/* Terminal radio-off also fences a queued or in-flight start. */
-		clocks_stop();
+		if (esb_initialized) {
+			/* Raw RX did not quiesce; the radio is still on. */
+			err = -EBUSY;
+		} else {
+			/* Terminal radio-off also fences a queued or in-flight start. */
+			clocks_stop();
+		}
 	}
 	if (!err) radio_user_disabled = !enabled;
 	k_mutex_unlock(&esb_radio_lock);
@@ -4179,7 +4193,12 @@ int esb_write_relay(void)
 #ifdef CONFIG_RELAY_FRAME_LEDGER
 		ledger_repair_wait_lateness = ledger_wait_lateness;
 #endif
-		bool admitted = tdma_wait_for_repair_slot(repair_slot, (uint8_t)length);
+		/* Bind admission to the granting frame: a late owner must not reuse
+		 * the same R slot of a later frame that may belong to another tracker. */
+		uint32_t admit_now;
+		bool admitted = tdma_wait_for_repair_slot(repair_slot, (uint8_t)length)
+			&& tdma_network_now(&admit_now)
+			&& (int32_t)(admit_now - repair_target) < (int32_t)RELAY_SLOT_TICKS;
 #ifdef CONFIG_RELAY_LEDGER_TIMING
 		admitted_cycles = relay_cycle_now();
 #endif
@@ -4480,11 +4499,14 @@ void esb_led_connection_facts(struct led_connection_facts *facts)
 {
 	unsigned key = irq_lock();
 	struct link_inputs link = esb_link_inputs_locked(k_uptime_get_32());
-	/* Healthy also while relayed: data provably reaches the receiver. */
-	facts->healthy = esb_initialized && esb_conn_state == ESB_ST_PAIRED && own_pong_seen
+	/* Healthy also while relayed: data provably reaches the receiver. Without an
+	 * own PONG this session, only a confirmed relayed delivery counts (the own
+	 * PONG age runs from session start, so it alone would read as healthy). */
+	facts->healthy = esb_initialized && esb_conn_state == ESB_ST_PAIRED
 		&& !esb_ota_is_active() && !channel_search && !channel_wait_normal && !layout_stale
-		&& (IS_ENABLED(CONFIG_CONNECTION_RELAY) ? link_delivering(&link)
-			: ping_failures < 3 && (uint32_t)(k_uptime_get_32() - own_pong_time) < 4500);
+		&& (IS_ENABLED(CONFIG_CONNECTION_RELAY)
+			? (own_pong_seen || link.relayed_age_ms < LINK_RELAYED_TIMEOUT_MS) && link_delivering(&link)
+			: own_pong_seen && ping_failures < 3 && (uint32_t)(k_uptime_get_32() - own_pong_time) < 4500);
 	facts->radio_required = !radio_user_disabled;
 	facts->paired = paired_addr[0] != 0 && !pair_provisional;
 	facts->pairing = pairing_search_active;

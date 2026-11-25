@@ -566,6 +566,10 @@ static inline bool relay_trailer_decode_len(const uint8_t *in, uint8_t length, s
 	trailer->pending_slot_ticks = pending ? in[11] : 0;
 	trailer->pending_member_mask = pending ? (uint16_t)(((uint16_t)in[12] << 8) | in[13]) : 0;
 	trailer->activation_units = pending ? (uint16_t)(((uint16_t)in[14] << 8) | in[15]) : 0;
+	/* The magic and the profile flag must agree; stagers select timing by the flag. */
+	if (pending && (in[0] == RELAY_TRAILER_PROFILE_MAGIC) != ((trailer->pending_total & 0x80U) != 0U)) {
+		return false;
+	}
 	if (pending && in[0] == RELAY_TRAILER_PROFILE_MAGIC) {
 		struct relay_geometry g;
 		if (!relay_geometry_from_bootstrap(trailer->pending_total, trailer->pending_slot_ticks, &g)

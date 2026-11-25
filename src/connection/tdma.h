@@ -168,8 +168,12 @@ void tdma_stage_clear(void);
 /* A staged "no slot" layout became current: keep data off the air. */
 bool tdma_layout_withdrawn(void);
 
-/** Snapshot of the receiver-assigned layout (valid only while TDMA is enabled). */
+/** Receiver-assigned relay profile. It outlives transient TDMA disables
+ * (session change, re-sync, user TDMA off); esb_relay_profile_lost() and
+ * tdma_profile_drop() retire it once the layout grant expires. */
 uint8_t tdma_profile_get(void);
+/** A private (relay) layout is staged but not yet active. */
+bool tdma_profile_staged(void);
 void tdma_profile_drop(void);
 struct relay_control;
 void tdma_stream_anchor(uint32_t preamble, uint32_t frame);
