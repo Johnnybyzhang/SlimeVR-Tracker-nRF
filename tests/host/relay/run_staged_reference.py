@@ -63,7 +63,7 @@ static uint32_t own_pong(bool pending, uint32_t activation)
 {
 	uint32_t tx_end = now_ticks();
 	uint32_t ping_rx = tx_end + K_TRUE;
-	esb_last_ack_tx_end_ticks = (uint32_t)virtual_us;
+	own_ack.tx_end_ticks = (uint32_t)virtual_us;
 	set_ticks(tx_end + ACK_LAG);
 	own_trailer = (struct relay_pong_trailer){.epoch = EPOCH, .member_mask = 0x7ff, .pending = pending, .pending_epoch = EPOCH + 1,
 		.pending_total = relay_geometry_code(11, 5), .pending_slot_ticks = 16,
@@ -379,7 +379,8 @@ def main():
              (root / "src/connection/relay_protocol.h").read_text(),
              "\n".join(re.findall(r"^#define (?:SKEW_REF_REFRESH_TICKS|SYNC_WARM_UP_COUNT)[^\n]*", esb, re.MULTILINE)),
              "static bool channel_wait_normal, own_trailer_valid; static uint8_t tracker_id;\n"
-             "static struct relay_pong_trailer own_trailer; static volatile uint32_t esb_last_ack_tx_end_ticks;\n"
+             "static struct relay_pong_trailer own_trailer;\n"
+             "static struct { uint32_t tx_end_ticks; } own_ack; static const typeof(own_ack) *const payload = &own_ack;\n"
              "static uint32_t g_last_rx_raw_ticks, g_min_rtt_ticks = 10;\n"
              "static int64_t k_uptime_get(void) { return (int64_t)(virtual_us / 1000); }",
              "static bool granted = true; static bool esb_layout_granted(void) { return granted; } bool esb_relay_granted_at(uint32_t tick);",

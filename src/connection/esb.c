@@ -2076,8 +2076,10 @@ static void esb_receive_pong(const struct esb_payload *payload)
 				 * peers' reference (it may keep that layout through a staged
 				 * 0->1 switch) and adopts receiver time at activation. */
 #if CONFIG_CONNECTION_RELAY
+				/* TX END of the attempt this ACK answered, delivered with
+				 * the ACK's own FIFO entry rather than a shared global. */
 				uint32_t tx_end = (uint32_t)net_ticks_from_kernel64(
-					kernel_ticks_extend32(esb_last_ack_tx_end_ticks));
+					kernel_ticks_extend32(payload->tx_end_ticks));
 				struct relay_geometry bootstrap;
 				if ((!tdma_is_enabled() || channel_wait_normal)
 					&& own_trailer_valid && own_trailer.pending
